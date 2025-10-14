@@ -33,7 +33,6 @@ from einops import rearrange
 import soundfile as sf
 import re
 
-import habana_frameworks.torch.core as htcore
 
 def _validate_args(args):
     # Basic check

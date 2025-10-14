@@ -1,5 +1,6 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import gc
+import os
 from functools import partial
 
 import torch
@@ -22,9 +23,10 @@ def shard_model(
     sharding_strategy=ShardingStrategy.FULL_SHARD,
     sync_module_states=True,
 ):
+    expected_device = torch.device("hpu", torch.hpu.current_device())
     assert (
-        device_id.type == 'hpu'
-    ), f"Expected device_id.type is hpu, but got {device_id}"
+        device_id == expected_device
+    ), f"Expected device_id {expected_device}, but got {device_id}"
     model = FSDP(
         module=model,
         process_group=process_group,

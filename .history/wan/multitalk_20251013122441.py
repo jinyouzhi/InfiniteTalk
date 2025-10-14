@@ -154,7 +154,7 @@ class InfiniteTalkPipeline:
         """
         if quant is not None and quant not in ("int8", "fp8"):
             raise ValueError("quant must be 'int8', 'fp8', or None(default fp32 model)")
-        self.device = torch.device(f"hpu:{device_id}")
+        self.device = torch.device(f"cuda:{device_id}")
         self.config = config
         self.rank = rank
         self.use_usp = use_usp
