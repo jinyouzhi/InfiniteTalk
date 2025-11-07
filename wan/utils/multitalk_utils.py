@@ -4,11 +4,11 @@ from einops import rearrange
 import torch
 import torch.nn as nn
 
-from xfuser.core.distributed import (
-    get_sequence_parallel_rank,
-    get_sequence_parallel_world_size,
-    get_sp_group,
-)
+#from xfuser.core.distributed import (
+#    get_sequence_parallel_rank,
+#    get_sequence_parallel_world_size,
+#    get_sp_group,
+#)
 from einops import rearrange, repeat
 from functools import lru_cache
 import imageio
@@ -127,16 +127,18 @@ def get_attn_map_with_target(visual_q, ref_k, shape, ref_target_masks=None, spli
 
     N_t, N_h, N_w = shape
     if enable_sp:
-        ref_k = get_sp_group().all_gather(ref_k, dim=1)
+        print(f"not support sp based on xfuser")
+        # ref_k = get_sp_group().all_gather(ref_k, dim=1)
     
     x_seqlens = N_h * N_w
     ref_k     = ref_k[:, :x_seqlens]
     _, seq_lens, heads, _ = visual_q.shape
     class_num, _ = ref_target_masks.shape
-    x_ref_attn_maps = torch.zeros(class_num, seq_lens).to(visual_q.device).to(visual_q.dtype)
+    # x_ref_attn_maps = torch.zeros(class_num, seq_lens).to(visual_q.device).to(visual_q.dtype)
+    x_ref_attn_maps = torch.zeros(class_num, seq_lens, device=visual_q.device, dtype=visual_q.dtype)
 
     split_chunk = heads // split_num
-    
+
     for i in range(split_num):
         x_ref_attn_maps_perhead = calculate_x_ref_attn_map(visual_q[:, :, i*split_chunk:(i+1)*split_chunk, :], ref_k[:, :, i*split_chunk:(i+1)*split_chunk, :], ref_target_masks)
         x_ref_attn_maps += x_ref_attn_maps_perhead

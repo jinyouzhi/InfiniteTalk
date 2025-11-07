@@ -11,7 +11,7 @@ from einops import rearrange
 from diffusers import ModelMixin
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 
-from .attention import flash_attention, SingleStreamMutiAttention
+from .attention import flash_attention, SingleStreamMutiAttention, attention
 from ..utils.multitalk_utils import get_attn_map_with_target
 import logging
 try:
@@ -24,6 +24,7 @@ except:
 __all__ = ['WanModel']
 
 
+from habana_frameworks.torch.hpex.kernels import FusedSDPA
 
 def sinusoidal_embedding_1d(dim, position):
     # preprocess
@@ -49,31 +50,62 @@ def rope_params(max_seq_len, dim, theta=10000):
     freqs = torch.polar(torch.ones_like(freqs), freqs)
     return freqs
 
-
 @amp.autocast(enabled=False)
-def rope_apply(x, grid_sizes, freqs):
+def rope_apply_real(x, grid_sizes, freqs):
     s, n, c = x.size(1), x.size(2), x.size(3) // 2
-
     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
-
     output = []
+    # print(f"{x.dtype=}, {x.shape=}")
     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
         seq_len = f * h * w
-
-        x_i = torch.view_as_complex(x[i, :s].to(torch.float64).reshape(
-            s, n, -1, 2))
+        x_cos, x_sin = x[i, :s].to(dtype=torch.float64).reshape(s, n, -1 ,2).unbind(-1)
         freqs_i = torch.cat([
             freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
             freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
             freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
         ],
                             dim=-1).reshape(seq_len, 1, -1)
-        freqs_i = freqs_i.to(device=x_i.device)
-        x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
+        # x_i = torch.view_as_real(x_i * freqs_i).flatten(2).to('hpu')
+        # freqs_cos, freqs_sin = freqs_i.view(*freqs_i.shape[:-1], -1, 2).unbind(-1)
+        freqs_cos, freqs_sin = torch.view_as_real(freqs_i).view(*freqs_i.shape[:-1], -1, 2).unbind(-1)
+        freqs_cos, freqs_sin = freqs_cos.to(device=x_cos.device, dtype=x_cos.dtype), freqs_sin.to(device=x_cos.device, dtype=x_cos.dtype)
+        # print(f"{freqs_cos.shape=}, {freqs_sin.shape=}")
+        # print(f"{freqs_cos.dtype=}, {freqs_sin.dtype=}")
+        # print(f"{freqs_cos.device=}, {freqs_sin.device=}")
+        # print(f"{x_cos.shape=}, {x_sin.shape=}")
+        # print(f"{x_cos.dtype=}, {x_sin.dtype=}")
+        # print(f"{x_cos.device=}, {x_sin.device=}")
+        x_cos = x_cos * freqs_cos - x_sin * freqs_sin
+        x_sin = x_cos * freqs_sin + x_sin * freqs_cos
+        x_i = torch.cat([x_cos.unsqueeze(-1), x_sin.unsqueeze(-1)], dim=-1).flatten(2)
         x_i = torch.cat([x_i, x[i, seq_len:]])
-
         output.append(x_i)
     return torch.stack(output).float()
+
+# @amp.autocast(enabled=False)
+# def rope_apply(x, grid_sizes, freqs):
+#     s, n, c = x.size(1), x.size(2), x.size(3) // 2
+
+#     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+
+#     output = []
+#     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
+#         seq_len = f * h * w
+
+#         x_i = torch.view_as_complex(x[i, :s].to(torch.float64).reshape(
+#             s, n, -1, 2))
+#         freqs_i = torch.cat([
+#             freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+#             freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+#             freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+#         ],
+#                             dim=-1).reshape(seq_len, 1, -1)
+#         freqs_i = freqs_i.to(device=x_i.device)
+#         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
+#         x_i = torch.cat([x_i, x[i, seq_len:]])
+
+#         output.append(x_i)
+#     return torch.stack(output).float()
 
 
 class WanRMSNorm(nn.Module):
@@ -89,6 +121,8 @@ class WanRMSNorm(nn.Module):
         Args:
             x(Tensor): Shape [B, L, C]
         """
+        ##print(f"{x.dtype=}")
+        ##print(f"{self.weight.dtype=}")
         return self._norm(x.float()).type_as(x) * self.weight
 
     def _norm(self, x):
@@ -102,6 +136,11 @@ class WanLayerNorm(nn.LayerNorm):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         origin_dtype = inputs.dtype
+        #print(f"{inputs.dtype=}, {self.weight=}, {self.bias=}")
+        ##print(f"{inputs.dtype=}")
+        #print(f"{self.weight.device=}")
+        #print(self.bias)
+        ##print(f"{self.weight=}")
         out = F.layer_norm(
             inputs.float(), 
             self.normalized_shape, 
@@ -148,20 +187,20 @@ class WanSelfAttention(nn.Module):
             return q, k, v
         q, k, v = qkv_fn(x)
 
-        q = rope_apply(q, grid_sizes, freqs)
-        k = rope_apply(k, grid_sizes, freqs)
+        q = rope_apply_real(q.to("hpu"), grid_sizes, freqs).to("hpu")
+        k = rope_apply_real(k.to("hpu"), grid_sizes, freqs).to("hpu")
 
         if USE_SAGEATTN:
             x = sageattn(q.to(torch.bfloat16), k.to(torch.bfloat16), v, tensor_layout='NHD')
         else:
-            x = flash_attention(
+            #x = flash_attention(
+            x = attention(
                 q=q,
                 k=k,
                 v=v,
                 k_lens=seq_lens,
                 window_size=self.window_size
             ).type_as(x)
-
         # output
         x = x.flatten(2)
         x = self.o(x)
@@ -201,10 +240,10 @@ class WanI2VCrossAttention(WanSelfAttention):
             img_x = sageattn(q, k_img, v_img, tensor_layout='NHD')
             x = sageattn(q, k, v, tensor_layout='NHD')
         else:   
-            img_x = flash_attention(q, k_img, v_img, k_lens=None)
-            # compute attention
-            x = flash_attention(q, k, v, k_lens=context_lens)
-
+            # img_x = flash_attention(q, k_img, v_img, k_lens=None)
+            img_x = attention(q, k_img, v_img, k_lens=None)
+            # x = flash_attention(q, k, v, k_lens=context_lens)
+            x = attention(q, k, v, k_lens=context_lens)
         # output
         x = x.flatten(2)
         img_x = img_x.flatten(2)
@@ -632,8 +671,8 @@ class WanModel(ModelMixin, ConfigMixin):
         # time embeddings
         with amp.autocast(dtype=torch.float32):
             e = self.time_embedding(
-                sinusoidal_embedding_1d(self.freq_dim, t).float())
-            e0 = self.time_projection(e).unflatten(1, (6, self.dim))
+                sinusoidal_embedding_1d(self.freq_dim, t).float()).float()
+            e0 = self.time_projection(e).unflatten(1, (6, self.dim)).float()
             assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
         # text embedding

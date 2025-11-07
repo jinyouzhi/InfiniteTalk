@@ -3,12 +3,14 @@ import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 from ..utils.multitalk_utils import RotaryPositionalEmbedding1D, normalize_and_scale, split_token_counts_and_frame_ids
-from xfuser.core.distributed import (
-    get_sequence_parallel_rank,
-    get_sequence_parallel_world_size,
-    get_sp_group,
-)
-import xformers.ops
+#from xfuser.core.distributed import (
+#    get_sequence_parallel_rank,
+#    get_sequence_parallel_world_size,
+#    get_sp_group,
+#)
+#import xformers.ops
+from habana_frameworks.torch.hpex.kernels import FusedSDPA
+import habana_frameworks.torch.hpu as ht
 
 try:
     import flash_attn_interface
@@ -60,7 +62,7 @@ def flash_attention(
     """
     half_dtypes = (torch.float16, torch.bfloat16)
     assert dtype in half_dtypes
-    assert q.device.type == 'cuda' and q.size(-1) <= 256
+    assert q.device.type == 'hpu' and q.size(-1) <= 256
 
     # params
     b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
@@ -180,9 +182,10 @@ def attention(
         q = q.transpose(1, 2).to(dtype)
         k = k.transpose(1, 2).to(dtype)
         v = v.transpose(1, 2).to(dtype)
-
-        out = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p)
+        
+        out = FusedSDPA.apply(q, k, v, attn_mask, dropout_p, causal)
+        # out = torch.nn.functional.scaled_dot_product_attention(
+        #     q, k, v, attn_mask=attn_mask, is_causal=causal, dropout_p=dropout_p)
 
         out = out.transpose(1, 2).contiguous()
         return out
@@ -250,21 +253,23 @@ class SingleStreamAttention(nn.Module):
             encoder_k = self.add_k_norm(encoder_k)
 
 
-        q = rearrange(q, "B H M K -> B M H K")
-        encoder_k = rearrange(encoder_k, "B H M K -> B M H K")
-        encoder_v = rearrange(encoder_v, "B H M K -> B M H K")
+        # q = rearrange(q, "B H M K -> B M H K")
+        # encoder_k = rearrange(encoder_k, "B H M K -> B M H K")
+        # encoder_v = rearrange(encoder_v, "B H M K -> B M H K")
 
         if enable_sp:
+            print(f"not support sp based on xformers")
             # context parallel
-            sp_size = get_sequence_parallel_world_size()
-            sp_rank = get_sequence_parallel_rank()
-            visual_seqlen, _ = split_token_counts_and_frame_ids(N_t, N_h * N_w, sp_size, sp_rank)
-            assert kv_seq is not None, f"kv_seq should not be None."
-            attn_bias = xformers.ops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(visual_seqlen, kv_seq)
+            # sp_size = get_sequence_parallel_world_size()
+            # sp_rank = get_sequence_parallel_rank()
+            # visual_seqlen, _ = split_token_counts_and_frame_ids(N_t, N_h * N_w, sp_size, sp_rank)
+            # assert kv_seq is not None, f"kv_seq should not be None."
+            # attn_bias = xformers.ops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(visual_seqlen, kv_seq)
         else:
             attn_bias = None
-        x = xformers.ops.memory_efficient_attention(q, encoder_k, encoder_v, attn_bias=attn_bias, op=None,)
-        x = rearrange(x, "B M H K -> B H M K") 
+        # x = xformers.ops.memory_efficient_attention(q, encoder_k, encoder_v, attn_bias=attn_bias, op=None,)
+        # x = rearrange(x, "B M H K -> B H M K") 
+        x = FusedSDPA.apply(q, encoder_k, encoder_v, attn_bias)
 
         # linear transform
         x_output_shape = (B, N, C)
@@ -374,11 +379,12 @@ class SingleStreamMutiAttention(SingleStreamAttention):
         encoder_k = rearrange(encoder_k, "B H (N_t S) C -> (B N_t) H S C", N_t=N_t)
 
  
-        q = rearrange(q, "B H M K -> B M H K")
-        encoder_k = rearrange(encoder_k, "B H M K -> B M H K")
-        encoder_v = rearrange(encoder_v, "B H M K -> B M H K")
-        x = xformers.ops.memory_efficient_attention(q, encoder_k, encoder_v, attn_bias=None, op=None,)
-        x = rearrange(x, "B M H K -> B H M K")
+        # q = rearrange(q, "B H M K -> B M H K")
+        # encoder_k = rearrange(encoder_k, "B H M K -> B M H K")
+        # encoder_v = rearrange(encoder_v, "B H M K -> B M H K")
+        # x = xformers.ops.memory_efficient_attention(q, encoder_k, encoder_v, attn_bias=None, op=None,)
+        x = FusedSDPA.apply(q, encoder_k, encoder_v, attn_bias)
+        # x = rearrange(x, "B M H K -> B H M K")
 
         # linear transform
         x_output_shape = (B, N, C)

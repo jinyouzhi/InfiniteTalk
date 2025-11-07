@@ -82,7 +82,13 @@ class SelfAttention(nn.Module):
 
         # compute attention
         p = self.attn_dropout if self.training else 0.0
-        x = flash_attention(q, k, v, dropout_p=p, causal=self.causal, version=2)
+        # x = flash_attention(q, k, v, dropout_p=p, causal=self.causal, version=2)
+        from habana_frameworks.torch.hpex.kernels import FusedSDPA
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
+        v = v.transpose(1, 2).contiguous()
+        x = FusedSDPA.apply(q, k, v, None, p, self.causal)
+        x = x.transpose(1, 2).contiguous()
         x = x.reshape(b, s, c)
 
         # output
@@ -537,6 +543,6 @@ class CLIPModel:
         videos = self.transforms.transforms[-1](videos.mul_(0.5).add_(0.5))
 
         # forward
-        with torch.cuda.amp.autocast(dtype=self.dtype):
-            out = self.model.visual(videos, use_31_block=True)
+        with torch.cuda.amp.autocast(enabled=False, dtype=self.dtype):
+            out = self.model.visual(videos.to(dtype=self.dtype), use_31_block=True).to(dtype=videos.dtype)
             return out

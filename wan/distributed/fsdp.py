@@ -9,6 +9,7 @@ from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
 from torch.distributed.utils import _free_storage
 
 # Gaudi-specific
+import os
 import habana_frameworks.torch.distributed.hccl
 os.environ["PT_HPU_LAZY_MODE"] = "0"
 

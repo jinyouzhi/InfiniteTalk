@@ -7,6 +7,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+import habana_frameworks.torch.core as htcore
+
+
 __all__ = [
     'WanVAE',
 ]
@@ -622,7 +625,7 @@ class WanVAE:
                  z_dim=16,
                  vae_pth='cache/vae_step_411000.pth',
                  dtype=torch.float,
-                 device="cuda"):
+                 device="hpu"):
         self.dtype = dtype
         self.device = device
 
@@ -642,7 +645,8 @@ class WanVAE:
         self.model = _video_vae(
             pretrained_path=vae_pth,
             z_dim=z_dim,
-        ).eval().requires_grad_(False).to(device)
+            device=self.device,
+        ).eval().requires_grad_(False)#.to(device)
 
     def encode(self, videos):
         """
