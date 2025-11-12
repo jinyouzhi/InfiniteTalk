@@ -82,30 +82,30 @@ def rope_apply_real(x, grid_sizes, freqs):
         output.append(x_i)
     return torch.stack(output).float()
 
-# @amp.autocast(enabled=False)
-# def rope_apply(x, grid_sizes, freqs):
-#     s, n, c = x.size(1), x.size(2), x.size(3) // 2
+@amp.autocast(enabled=False)
+def rope_apply(x, grid_sizes, freqs):
+    s, n, c = x.size(1), x.size(2), x.size(3) // 2
 
-#     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+    freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
 
-#     output = []
-#     for i, (f, h, w) in enumerate(grid_sizes.tolist()):
-#         seq_len = f * h * w
+    output = []
+    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
+        seq_len = f * h * w
 
-#         x_i = torch.view_as_complex(x[i, :s].to(torch.float64).reshape(
-#             s, n, -1, 2))
-#         freqs_i = torch.cat([
-#             freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-#             freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-#             freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-#         ],
-#                             dim=-1).reshape(seq_len, 1, -1)
-#         freqs_i = freqs_i.to(device=x_i.device)
-#         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-#         x_i = torch.cat([x_i, x[i, seq_len:]])
+        x_i = torch.view_as_complex(x[i, :s].to(torch.float64).reshape(
+            s, n, -1, 2))
+        freqs_i = torch.cat([
+            freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+            freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+            freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+        ],
+                            dim=-1).reshape(seq_len, 1, -1)
+        freqs_i = freqs_i.to(device=x_i.device)
+        x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
+        x_i = torch.cat([x_i, x[i, seq_len:]])
 
-#         output.append(x_i)
-#     return torch.stack(output).float()
+        output.append(x_i)
+    return torch.stack(output).float()
 
 
 class WanRMSNorm(nn.Module):
@@ -121,8 +121,6 @@ class WanRMSNorm(nn.Module):
         Args:
             x(Tensor): Shape [B, L, C]
         """
-        ##print(f"{x.dtype=}")
-        ##print(f"{self.weight.dtype=}")
         return self._norm(x.float()).type_as(x) * self.weight
 
     def _norm(self, x):
@@ -136,11 +134,6 @@ class WanLayerNorm(nn.LayerNorm):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         origin_dtype = inputs.dtype
-        #print(f"{inputs.dtype=}, {self.weight=}, {self.bias=}")
-        ##print(f"{inputs.dtype=}")
-        #print(f"{self.weight.device=}")
-        #print(self.bias)
-        ##print(f"{self.weight=}")
         out = F.layer_norm(
             inputs.float(), 
             self.normalized_shape, 
@@ -187,8 +180,10 @@ class WanSelfAttention(nn.Module):
             return q, k, v
         q, k, v = qkv_fn(x)
 
-        q = rope_apply_real(q.to("hpu"), grid_sizes, freqs).to("hpu")
-        k = rope_apply_real(k.to("hpu"), grid_sizes, freqs).to("hpu")
+        # q = rope_apply_real(q.to("hpu"), grid_sizes, freqs).to("hpu")
+        # k = rope_apply_real(k.to("hpu"), grid_sizes, freqs).to("hpu")
+        q = rope_apply_real(q.to("cpu"), grid_sizes, freqs.to("cpu")).to(x.device)
+        k = rope_apply_real(k.to("cpu"), grid_sizes, freqs.to("cpu")).to(x.device)
 
         if USE_SAGEATTN:
             x = sageattn(q.to(torch.bfloat16), k.to(torch.bfloat16), v, tensor_layout='NHD')
