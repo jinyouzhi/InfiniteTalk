@@ -3,7 +3,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.cuda.amp as amp
-from xfuser.core.distributed import (
+# from xfuser.core.distributed import (
+from parallel_state import (
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
     get_sp_group,

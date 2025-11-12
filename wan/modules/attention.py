@@ -4,10 +4,11 @@ import torch.nn as nn
 from einops import rearrange, repeat
 from ..utils.multitalk_utils import RotaryPositionalEmbedding1D, normalize_and_scale, split_token_counts_and_frame_ids
 #from xfuser.core.distributed import (
-#    get_sequence_parallel_rank,
-#    get_sequence_parallel_world_size,
-#    get_sp_group,
-#)
+from wan.distributed.parallel_state import (
+    get_sequence_parallel_rank,
+    get_sequence_parallel_world_size,
+    get_sp_group,
+)
 #import xformers.ops
 from habana_frameworks.torch.hpex.kernels import FusedSDPA
 import habana_frameworks.torch.hpu as ht

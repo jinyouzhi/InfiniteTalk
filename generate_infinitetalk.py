@@ -480,7 +480,8 @@ def generate(args):
 
     if args.ulysses_size > 1 or args.ring_size > 1:
         assert args.ulysses_size * args.ring_size == world_size, f"The number of ulysses_size and ring_size should be equal to the world size."
-        from xfuser.core.distributed import (
+        # from xfuser.core.distributed import (
+        from wan.distributed.parallel_state import (
             init_distributed_environment,
             initialize_model_parallel,
         )

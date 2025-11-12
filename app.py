@@ -458,17 +458,18 @@ def run_graio_demo(args):
         assert args.ulysses_size * args.ring_size == world_size, f"The number of ulysses_size and ring_size should be equal to the world size."
         print(f"not support sp based on xfuser")
         #from xfuser.core.distributed import (
-        #    init_distributed_environment,
-        #    initialize_model_parallel,
-        #)
-        #init_distributed_environment(
-        #    rank=dist.get_rank(), world_size=dist.get_world_size())
+        from wan.distributed.parallel_state import (
+            init_distributed_environment,
+            initialize_model_parallel,
+        )
+        init_distributed_environment(
+            rank=dist.get_rank(), world_size=dist.get_world_size())
 
-        #initialize_model_parallel(
-        #    sequence_parallel_degree=dist.get_world_size(),
-        #    ring_degree=args.ring_size,
-        #    ulysses_degree=args.ulysses_size,
-        #)
+        initialize_model_parallel(
+            sequence_parallel_degree=dist.get_world_size(),
+            ring_degree=args.ring_size,
+            ulysses_degree=args.ulysses_size,
+        )
 
    
     cfg = WAN_CONFIGS[args.task]

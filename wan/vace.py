@@ -96,7 +96,8 @@ class WanVace(WanT2V):
         self.model.eval().requires_grad_(False)
 
         if use_usp:
-            from xfuser.core.distributed import get_sequence_parallel_world_size
+            # from xfuser.core.distributed import get_sequence_parallel_world_size
+            from wan.distributed.parallel_state import get_sequence_parallel_world_size
 
             from .distributed.xdit_context_parallel import (
                 usp_attn_forward,
@@ -573,7 +574,8 @@ class WanVaceMP(WanVace):
                 rank=rank,
                 world_size=world_size)
 
-            from xfuser.core.distributed import (
+            # from xfuser.core.distributed import (
+            from wan.distributed.parallel_state import (
                 init_distributed_environment,
                 initialize_model_parallel,
             )
@@ -609,7 +611,8 @@ class WanVaceMP(WanVace):
             model.eval().requires_grad_(False)
 
             if self.use_usp:
-                from xfuser.core.distributed import get_sequence_parallel_world_size
+                # from xfuser.core.distributed import get_sequence_parallel_world_size
+                from wan.distributed.parallel_state import get_sequence_parallel_world_size
 
                 from .distributed.xdit_context_parallel import (
                     usp_attn_forward,

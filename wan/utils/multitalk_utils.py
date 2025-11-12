@@ -128,7 +128,7 @@ def get_attn_map_with_target(visual_q, ref_k, shape, ref_target_masks=None, spli
     N_t, N_h, N_w = shape
     if enable_sp:
         print(f"not support sp based on xfuser")
-        # ref_k = get_sp_group().all_gather(ref_k, dim=1)
+        ref_k = get_sp_group().all_gather(ref_k, dim=1)
     
     x_seqlens = N_h * N_w
     ref_k     = ref_k[:, :x_seqlens]
