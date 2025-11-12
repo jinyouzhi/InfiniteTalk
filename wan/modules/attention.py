@@ -259,13 +259,13 @@ class SingleStreamAttention(nn.Module):
         # encoder_v = rearrange(encoder_v, "B H M K -> B M H K")
 
         if enable_sp:
-            print(f"not support sp based on xformers")
             # context parallel
             # sp_size = get_sequence_parallel_world_size()
             # sp_rank = get_sequence_parallel_rank()
             # visual_seqlen, _ = split_token_counts_and_frame_ids(N_t, N_h * N_w, sp_size, sp_rank)
             # assert kv_seq is not None, f"kv_seq should not be None."
             # attn_bias = xformers.ops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(visual_seqlen, kv_seq)
+            attn_bias = None
         else:
             attn_bias = None
         # x = xformers.ops.memory_efficient_attention(q, encoder_k, encoder_v, attn_bias=attn_bias, op=None,)

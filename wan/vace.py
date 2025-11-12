@@ -567,9 +567,11 @@ class WanVaceMP(WanVace):
             rank = pmi_rank * gpu_infer + gpu
             print("world_size", world_size, "rank", rank, flush=True)
 
-            torch.cuda.set_device(gpu)
+            import habana_frameworks.torch.core as htcore
+            # torch.hpu.set_device(gpu)
+            htcore.hpu.set_device(local_rank)
             dist.init_process_group(
-                backend='nccl',
+                backend='hccl',
                 init_method='env://',
                 rank=rank,
                 world_size=world_size)

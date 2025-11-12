@@ -464,9 +464,11 @@ def generate(args):
         logging.info(
             f"offload_model is not specified, set to {args.offload_model}.")
     if world_size > 1:
-        torch.cuda.set_device(local_rank)
+        import habana_frameworks.torch.core as htcore
+        # torch.hpu.set_device(local_rank)
+        htcore.hpu.set_device(local_rank)
         dist.init_process_group(
-            backend="nccl",
+            backend="hccl",
             init_method="env://",
             rank=rank,
             world_size=world_size)

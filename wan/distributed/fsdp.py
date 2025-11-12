@@ -36,8 +36,8 @@ def shard_model(
         #     param_dtype=param_dtype,
         #     reduce_dtype=reduce_dtype,
         #     buffer_dtype=buffer_dtype),
-        device_id=device_id, # device_id = torch.device("hpu", torch.hpu.current_device())
-        sync_module_states=sync_module_states)
+        # device_id=device_id, # device_id = torch.device("hpu", torch.hpu.current_device())
+        sync_module_states=sync_module_states).to(device_id)
     return model
 
 

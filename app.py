@@ -33,6 +33,8 @@ from einops import rearrange
 import soundfile as sf
 import re
 
+import habana_frameworks.torch.core as htcore
+
 def _validate_args(args):
     # Basic check
     assert args.ckpt_dir is not None, "Please specify the checkpoint directory."
@@ -440,9 +442,11 @@ def run_graio_demo(args):
         logging.info(
             f"offload_model is not specified, set to {args.offload_model}.")
     if world_size > 1:
-        torch.cuda.set_device(local_rank)
+        # torch.hpu.set_device(local_rank)
+
+        htcore.hpu.set_device(local_rank)
         dist.init_process_group(
-            backend="nccl",
+            backend="hccl",
             init_method="env://",
             rank=rank,
             world_size=world_size)

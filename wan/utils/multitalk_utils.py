@@ -4,11 +4,12 @@ from einops import rearrange
 import torch
 import torch.nn as nn
 
-#from xfuser.core.distributed import (
-#    get_sequence_parallel_rank,
-#    get_sequence_parallel_world_size,
-#    get_sp_group,
-#)
+# from xfuser.core.distributed import (
+from wan.distributed.parallel_state import (
+    get_sequence_parallel_rank,
+    get_sequence_parallel_world_size,
+    get_sp_group,
+)
 from einops import rearrange, repeat
 from functools import lru_cache
 import imageio
@@ -127,7 +128,6 @@ def get_attn_map_with_target(visual_q, ref_k, shape, ref_target_masks=None, spli
 
     N_t, N_h, N_w = shape
     if enable_sp:
-        print(f"not support sp based on xfuser")
         ref_k = get_sp_group().all_gather(ref_k, dim=1)
     
     x_seqlens = N_h * N_w

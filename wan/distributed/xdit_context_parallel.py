@@ -4,19 +4,21 @@ import torch
 import torch.nn as nn
 import torch.cuda.amp as amp
 # from xfuser.core.distributed import (
-from parallel_state import (
+from wan.distributed.parallel_state import (
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
     get_sp_group,
 )
 from einops import rearrange
-from xfuser.core.long_ctx_attention import xFuserLongContextAttention
-import xformers.ops
+# from xfuser.core.long_ctx_attention import xFuserLongContextAttention
+# import xformers.ops
 
 from ..modules.model import sinusoidal_embedding_1d
 from ..utils.multitalk_utils import get_attn_map_with_target, split_token_counts_and_frame_ids, normalize_and_scale
-from ..modules.attention import SingleStreamAttention, SingleStreamMutiAttention
+from ..modules.attention import SingleStreamAttention, SingleStreamMutiAttention, attention
 
+
+from habana_frameworks.torch.hpex.kernels import FusedSDPA
 
 def pad_freqs(original_tensor, target_len):
     seq_len, s1, s2 = original_tensor.shape
@@ -117,8 +119,8 @@ def usp_dit_forward(
         assert clip_fea is not None and y is not None
     # params
     device = self.patch_embedding.weight.device
-    if self.freqs.device != device:
-        self.freqs = self.freqs.to(device)
+    # if self.freqs.device != device:
+    #     self.freqs = self.freqs.to(device)
 
     if self.model_type != 'vace' and y is not None:
         x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
@@ -202,8 +204,10 @@ def usp_attn_forward(self,
         return q, k, v
 
     q, k, v = qkv_fn(x)
-    q = rope_apply(q, grid_sizes, freqs)
-    k = rope_apply(k, grid_sizes, freqs)
+    # q = rope_apply(q, grid_sizes, freqs)
+    # k = rope_apply(k, grid_sizes, freqs)
+    q = rope_apply(q.to("cpu"), grid_sizes, freqs.to("cpu")).to(x.device)
+    k = rope_apply(k.to("cpu"), grid_sizes, freqs.to("cpu")).to(x.device)
 
     # TODO: We should use unpaded q,k,v for attention.
     # k_lens = seq_lens // get_sequence_parallel_world_size()
@@ -212,12 +216,13 @@ def usp_attn_forward(self,
     #     k = torch.cat([u[:l] for u, l in zip(k, k_lens)]).unsqueeze(0)
     #     v = torch.cat([u[:l] for u, l in zip(v, k_lens)]).unsqueeze(0)
 
-    x = xFuserLongContextAttention()(
-        None,
-        query=half(q),
-        key=half(k),
-        value=half(v),
-        window_size=self.window_size)
+    x = FusedSDPA(q.half(), k.half(), v.half())
+    # x = xFuserLongContextAttention()(
+    #     None,
+    #     query=half(q),
+    #     key=half(k),
+    #     value=half(v),
+    #     window_size=self.window_size)
 
     # TODO: padding after attention.
     # x = torch.cat([x, x.new_zeros(b, s - x.size(1), n, d)], dim=1)
@@ -250,8 +255,8 @@ def usp_dit_forward_multitalk(
     assert clip_fea is not None and y is not None
     # params
     device = self.patch_embedding.weight.device
-    if self.freqs.device != device:
-        self.freqs = self.freqs.to(device)
+    # if self.freqs.device != device:
+    #     self.freqs = self.freqs.to(device)
 
     _, T, H, W = x[0].shape
     N_t = T // self.patch_size[0]
@@ -277,8 +282,8 @@ def usp_dit_forward_multitalk(
     # time embeddings
     with amp.autocast(dtype=torch.float32):
         e = self.time_embedding(
-            sinusoidal_embedding_1d(self.freq_dim, t).float())
-        e0 = self.time_projection(e).unflatten(1, (6, self.dim))
+            sinusoidal_embedding_1d(self.freq_dim, t).float()).float()
+        e0 = self.time_projection(e).unflatten(1, (6, self.dim)).float()
         assert e.dtype == torch.float32 and e0.dtype == torch.float32
 
     # context
@@ -291,7 +296,7 @@ def usp_dit_forward_multitalk(
 
     if clip_fea is not None:
         context_clip = self.img_emb(clip_fea)  
-        context = torch.concat([context_clip, context], dim=1)
+        context = torch.concat([context_clip, context], dim=1).to(x.dtype)
 
     # get audio token
     audio_cond = audio.to(device=x.device, dtype=x.dtype)
@@ -447,17 +452,25 @@ def usp_attn_forward_multitalk(self,
         return q, k, v
 
     q, k, v = qkv_fn(x)
-    q = rope_apply(q, grid_sizes, freqs)
-    k = rope_apply(k, grid_sizes, freqs)
+    # q = rope_apply(q, grid_sizes, freqs)
+    # k = rope_apply(k, grid_sizes, freqs)
+    q = rope_apply(q.to("cpu"), grid_sizes, freqs.to("cpu")).to(x.device)
+    k = rope_apply(k.to("cpu"), grid_sizes, freqs.to("cpu")).to(x.device)
 
 
-    x = xFuserLongContextAttention()(
-        None,
-        query=half(q),
-        key=half(k),
-        value=half(v),
-        window_size=self.window_size)
-
+    # x = xFuserLongContextAttention()(
+    #     None,
+    #     query=half(q),
+    #     key=half(k),
+    #     value=half(v),
+    #     window_size=self.window_size)
+    x = attention(
+        q=half(q),
+        k=half(k),
+        v=half(v),
+        k_lens=seq_lens,
+        window_size=self.window_size
+    ).type_as(x)
 
     # output
     x = x.flatten(2)
@@ -534,12 +547,14 @@ def usp_crossattn_multi_forward_multitalk(self,
         encoder_k = self.rope_1d(encoder_k, encoder_pos)
 
         # get attn
-        q = rearrange(q, "B H M K -> B M H K")
-        encoder_k = rearrange(encoder_k, "B H M K -> B M H K")
-        encoder_v = rearrange(encoder_v, "B H M K -> B M H K")
-        attn_bias = xformers.ops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(visual_seqlen, kv_seq)
-        x = xformers.ops.memory_efficient_attention(q, encoder_k, encoder_v, attn_bias=attn_bias, op=None,)
-        x = rearrange(x, "B M H K -> B H M K")
+        # q = rearrange(q, "B H M K -> B M H K")
+        # encoder_k = rearrange(encoder_k, "B H M K -> B M H K")
+        # encoder_v = rearrange(encoder_v, "B H M K -> B M H K")
+        # attn_bias = xformers.ops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(visual_seqlen, kv_seq)
+        # x = xformers.ops.memory_efficient_attention(q, encoder_k, encoder_v, attn_bias=attn_bias, op=None,)
+        # x = rearrange(x, "B M H K -> B H M K")
+        attn_bias = None
+        x = FusedSDPA.apply(q, encoder_k, encoder_v, attn_bias)
 
         # linear transform
         x_output_shape = (B, N, C)
