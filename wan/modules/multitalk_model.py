@@ -182,8 +182,8 @@ class WanSelfAttention(nn.Module):
 
         # q = rope_apply_real(q.to("hpu"), grid_sizes, freqs).to("hpu")
         # k = rope_apply_real(k.to("hpu"), grid_sizes, freqs).to("hpu")
-        q = rope_apply_real(q.to("cpu"), grid_sizes, freqs.to("cpu")).to(x.device)
-        k = rope_apply_real(k.to("cpu"), grid_sizes, freqs.to("cpu")).to(x.device)
+        q = rope_apply(q.to("cpu"), grid_sizes, freqs.to("cpu")).to(x.device)
+        k = rope_apply(k.to("cpu"), grid_sizes, freqs.to("cpu")).to(x.device)
 
         if USE_SAGEATTN:
             x = sageattn(q.to(torch.bfloat16), k.to(torch.bfloat16), v, tensor_layout='NHD')

@@ -146,9 +146,12 @@ class WanSelfAttention(nn.Module):
 
         q, k, v = qkv_fn(x)
 
-        x = flash_attention(
-            q=rope_apply(q, grid_sizes, freqs),
-            k=rope_apply(k, grid_sizes, freqs),
+        q=rope_apply(q.to("cpu"), grid_sizes, freqs).to(x.device)
+        k=rope_apply(k.to("cpu"), grid_sizes, freqs).to(x.device)
+        #x = flash_attention(
+        x = attention(
+            q=q,
+            k=k,
             v=v,
             k_lens=seq_lens,
             window_size=self.window_size)
