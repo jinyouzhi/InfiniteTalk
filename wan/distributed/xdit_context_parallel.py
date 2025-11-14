@@ -15,7 +15,7 @@ from einops import rearrange
 
 from ..modules.model import sinusoidal_embedding_1d
 from ..utils.multitalk_utils import get_attn_map_with_target, split_token_counts_and_frame_ids, normalize_and_scale
-from ..modules.attention import SingleStreamAttention, SingleStreamMutiAttention, attention
+from ..modules.attention import SingleStreamAttention, SingleStreamMutiAttention, attention, block_diagonal_additive_mask_from_seqlens
 
 
 from habana_frameworks.torch.hpex.kernels import FusedSDPA
@@ -483,8 +483,6 @@ def usp_attn_forward_multitalk(self,
     return x, x_ref_attn_map
 
 
-
-
 def usp_crossattn_multi_forward_multitalk(self, 
                                         x: torch.Tensor, 
                                         encoder_hidden_states: torch.Tensor,  # 1, 21, 64, C
@@ -551,10 +549,13 @@ def usp_crossattn_multi_forward_multitalk(self,
         # encoder_k = rearrange(encoder_k, "B H M K -> B M H K")
         # encoder_v = rearrange(encoder_v, "B H M K -> B M H K")
         # attn_bias = xformers.ops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(visual_seqlen, kv_seq)
+        attn_bias = block_diagonal_additive_mask_from_seqlens(visual_seqlen, kv_seq, q.device, q.dtype)
+        # print(f"{visual_seqlen=}, {kv_seq=}, {q.device=}, {attn_bias=}")
+        attn_bias = attn_bias.unsqueeze(0).unsqueeze(0)
+
         # x = xformers.ops.memory_efficient_attention(q, encoder_k, encoder_v, attn_bias=attn_bias, op=None,)
-        # x = rearrange(x, "B M H K -> B H M K")
-        attn_bias = None
         x = FusedSDPA.apply(q, encoder_k, encoder_v, attn_bias)
+        # x = rearrange(x, "B M H K -> B H M K")
 
         # linear transform
         x_output_shape = (B, N, C)

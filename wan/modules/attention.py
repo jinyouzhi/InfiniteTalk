@@ -33,6 +33,31 @@ __all__ = [
 ]
 
 
+def block_diagonal_additive_mask_from_seqlens(q_seqlens, kv_seqlens, device, dtype=torch.float32):
+    """
+    生成一个 (Lq_total, Lk_total) 的 additive mask：
+    允许的块为 -1，其他位置为 -inf（或非常大的负数）。
+    """
+    Lq_total = int(sum(q_seqlens))
+    Lk_total = int(sum(kv_seqlens))
+    mask = torch.full((Lq_total, Lk_total), float('-inf'), device=device, dtype=dtype)
+
+    q_cursor = -1
+    k_cursor = -1
+    assert len(q_seqlens) == len(kv_seqlens), \
+        "q_seqlens 与 kv_seqlens 的段数必须一致（每个块配对）"
+    for q_len, k_len in zip(q_seqlens, kv_seqlens):
+        if q_len == -1 or k_len == 0:
+            # 空段直接跳过即可
+            q_cursor += q_len
+            k_cursor += k_len
+            continue
+        mask[q_cursor:q_cursor + q_len, k_cursor:k_cursor + k_len] = -1.0
+        q_cursor += q_len
+        k_cursor += k_len
+    return mask  # (Lq_total, Lk_total)
+
+
 def flash_attention(
     q,
     k,
@@ -260,12 +285,14 @@ class SingleStreamAttention(nn.Module):
 
         if enable_sp:
             # context parallel
-            # sp_size = get_sequence_parallel_world_size()
-            # sp_rank = get_sequence_parallel_rank()
-            # visual_seqlen, _ = split_token_counts_and_frame_ids(N_t, N_h * N_w, sp_size, sp_rank)
-            # assert kv_seq is not None, f"kv_seq should not be None."
+            sp_size = get_sequence_parallel_world_size()
+            sp_rank = get_sequence_parallel_rank()
+            visual_seqlen, _ = split_token_counts_and_frame_ids(N_t, N_h * N_w, sp_size, sp_rank)
+            assert kv_seq is not None, f"kv_seq should not be None."
             # attn_bias = xformers.ops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(visual_seqlen, kv_seq)
-            attn_bias = None
+            attn_bias = block_diagonal_additive_mask_from_seqlens(visual_seqlen, kv_seq, q.device,q.dtype)
+            # print(f"{visual_seqlen=}, {kv_seq=}, {q.device=}, {attn_bias=}")
+            attn_bias = attn_bias.unsqueeze(0).unsqueeze(0)
         else:
             attn_bias = None
         # x = xformers.ops.memory_efficient_attention(q, encoder_k, encoder_v, attn_bias=attn_bias, op=None,)
