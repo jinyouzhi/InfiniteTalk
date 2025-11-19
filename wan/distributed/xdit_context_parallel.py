@@ -216,7 +216,7 @@ def usp_attn_forward(self,
     #     k = torch.cat([u[:l] for u, l in zip(k, k_lens)]).unsqueeze(0)
     #     v = torch.cat([u[:l] for u, l in zip(v, k_lens)]).unsqueeze(0)
 
-    x = FusedSDPA(q.half(), k.half(), v.half())
+    x = attention(q.half(), k.half(), v.half())
     # x = xFuserLongContextAttention()(
     #     None,
     #     query=half(q),
@@ -235,6 +235,7 @@ def usp_attn_forward(self,
 
 
 
+# 最外层 WAN/DiT forward SP
 def usp_dit_forward_multitalk(
     self,
     x,
@@ -368,11 +369,13 @@ def usp_dit_forward_multitalk(
                     self.accumulated_rel_l1_distance_uncond = 0
             self.previous_e0_uncond = modulated_inp.clone()
 
+    # print(f"DiT forward before SP divide{x.shape=}")
     # Context Parallel
     x = torch.chunk(
         x, get_sequence_parallel_world_size(),
         dim=1)[get_sequence_parallel_rank()]
-
+    # print(f"DiT forward after SP divide{x.shape=}")
+    # print(f"{audio_embedding.shape=}")
     # arguments
     kwargs = dict(
         e=e0,
@@ -418,8 +421,10 @@ def usp_dit_forward_multitalk(
     # head
     x = self.head(x, e)
 
+    # print(f"DiT forward before SP gather{x.shape=}")
     # Context Parallel
     x = get_sp_group().all_gather(x, dim=1)
+    # print(f"DiT forward after SP gather{x.shape=}")
 
     # unpatchify
     x = self.unpatchify(x, grid_sizes)
@@ -431,6 +436,7 @@ def usp_dit_forward_multitalk(
     return torch.stack(x).float()
 
 
+# self attn SP
 def usp_attn_forward_multitalk(self,
                      x,
                      seq_lens,
@@ -438,6 +444,7 @@ def usp_attn_forward_multitalk(self,
                      freqs,
                      dtype=torch.bfloat16,
                      ref_target_masks=None):
+    # print(f"usp attn forward begainning {x.shape=}")
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
 
@@ -457,7 +464,13 @@ def usp_attn_forward_multitalk(self,
     q = rope_apply(q.to("cpu"), grid_sizes, freqs.to("cpu")).to(x.device)
     k = rope_apply(k.to("cpu"), grid_sizes, freqs.to("cpu")).to(x.device)
 
+    # Context Parallel
+    k = get_sp_group().all_gather(k, dim=1)
+    v = get_sp_group().all_gather(v, dim=1)
 
+    attn_bias=None
+
+    # xFuser 兼容 flash_attn2 格式
     # x = xFuserLongContextAttention()(
     #     None,
     #     query=half(q),
@@ -482,7 +495,7 @@ def usp_attn_forward_multitalk(self,
 
     return x, x_ref_attn_map
 
-
+# audio-cross-attan 
 def usp_crossattn_multi_forward_multitalk(self, 
                                         x: torch.Tensor, 
                                         encoder_hidden_states: torch.Tensor,  # 1, 21, 64, C
@@ -490,18 +503,21 @@ def usp_crossattn_multi_forward_multitalk(self,
                                         x_ref_attn_map=None,
                                         human_num=None) -> torch.Tensor:
         
-        N_t, N_h, N_w = shape 
-        sp_size = get_sequence_parallel_world_size()
-        sp_rank = get_sequence_parallel_rank()
-        audio_tokens_per_frame = 32
-        visual_seqlen, frame_ids = split_token_counts_and_frame_ids(N_t, N_h * N_w, sp_size, sp_rank)
-        encoder_hidden_states = encoder_hidden_states[:, min(frame_ids):max(frame_ids)+1, ...]
-        encoder_hidden_states = rearrange(encoder_hidden_states, "B T N C -> B (T N) C")
-        N_a = len(frame_ids)
-        kv_seq = [audio_tokens_per_frame * human_num] * N_a
+        # print(f"usp cross-attn forward begainning {x.shape=}, {encoder_hidden_states.shape=}")
+        # N_t, N_h, N_w = shape 
+        # sp_size = get_sequence_parallel_world_size()
+        # sp_rank = get_sequence_parallel_rank()
+        # audio_tokens_per_frame = 32
+        # visual_seqlen, frame_ids = split_token_counts_and_frame_ids(N_t, N_h * N_w, sp_size, sp_rank)
+        # encoder_hidden_states = encoder_hidden_states[:, min(frame_ids):max(frame_ids)+1, ...]
+        # encoder_hidden_states = rearrange(encoder_hidden_states, "B T N C -> B (T N) C")
+        # N_a = len(frame_ids)
+        # kv_seq = [audio_tokens_per_frame * human_num] * N_a
 
+        # case 走 这里
         if human_num == 1:
-            return super(SingleStreamMutiAttention, self).forward(x, encoder_hidden_states, shape, enable_sp=True, kv_seq=kv_seq)
+            encoder_hidden_states = encoder_hidden_states.squeeze(0)
+            return super(SingleStreamMutiAttention, self).forward(x, encoder_hidden_states, shape, enable_sp=True, kv_seq=None) #kv_seq)
 
 
         # get q for hidden_state
@@ -549,12 +565,20 @@ def usp_crossattn_multi_forward_multitalk(self,
         # encoder_k = rearrange(encoder_k, "B H M K -> B M H K")
         # encoder_v = rearrange(encoder_v, "B H M K -> B M H K")
         # attn_bias = xformers.ops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(visual_seqlen, kv_seq)
-        attn_bias = block_diagonal_additive_mask_from_seqlens(visual_seqlen, kv_seq, q.device, q.dtype)
-        # print(f"{visual_seqlen=}, {kv_seq=}, {q.device=}, {attn_bias=}")
-        attn_bias = attn_bias.unsqueeze(0).unsqueeze(0)
+        # attn_bias = block_diagonal_additive_mask_from_seqlens(visual_seqlen, kv_seq, q.device, q.dtype)
+        # print(f"{visual_seqlen=}, {kv_seq=}, {q.shape=}, {encoder_k.shape=}, {q.device=}, {attn_bias=}")
+        # attn_bias = attn_bias.unsqueeze(0).unsqueeze(0)
+        # printf(f"{attn_bias.shape=}")
+
+        # Context Parallel
+        # encoder_k_full = get_sp_group().all_gather(encoder_k, dim=1)
+        # encoder_v_full = get_sp_group().all_gather(encoder_v, dim=1)
+        attn_bias=None
+        
 
         # x = xformers.ops.memory_efficient_attention(q, encoder_k, encoder_v, attn_bias=attn_bias, op=None,)
-        x = FusedSDPA.apply(q, encoder_k, encoder_v, attn_bias)
+        # attention(q, encoder_k_full, encoder_v_full, attn_bias)
+        FusedSDPA.apply(q, encoder_k, encoder_v)
         # x = rearrange(x, "B M H K -> B H M K")
 
         # linear transform

@@ -253,11 +253,16 @@ class SingleStreamAttention(nn.Module):
         self.add_q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.add_k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
 
+    # audio-cross-attn 实际上调用这里
     def forward(self, x: torch.Tensor, encoder_hidden_states: torch.Tensor, shape=None, enable_sp=False, kv_seq=None) -> torch.Tensor:
+        # print(f"single stream attn forward before SP gather, {encoder_hidden_states.shape=} {x.shape=}")
        
         N_t, N_h, N_w = shape
         if not enable_sp:
             x = rearrange(x, "B (N_t S) C -> (B N_t) S C", N_t=N_t)
+        # else:
+        #     encoder_hidden_states = get_sp_group().all_gather(encoder_hidden_states, dim=1)
+        #     print(f"single stream attn forward after SP gather, {encoder_hidden_states.shape=}")
 
         # get q for hidden_state
         B, N, C = x.shape
@@ -269,9 +274,10 @@ class SingleStreamAttention(nn.Module):
             q = self.q_norm(q)
         
         # get kv from encoder_hidden_states
-        _, N_a, _ = encoder_hidden_states.shape
+        # _, N_a, _ = encoder_hidden_states.shape
         encoder_kv = self.kv_linear(encoder_hidden_states)
-        encoder_kv_shape = (B, N_a, 2, self.num_heads, self.head_dim)
+        encoder_kv_shape = (B, -1, 2, self.num_heads, self.head_dim)
+        # print(f"{encoder_kv.shape=}, {encoder_kv_shape=}")
         encoder_kv = encoder_kv.view(encoder_kv_shape).permute((2, 0, 3, 1, 4)) 
         encoder_k, encoder_v = encoder_kv.unbind(0)
 
@@ -283,18 +289,25 @@ class SingleStreamAttention(nn.Module):
         # encoder_k = rearrange(encoder_k, "B H M K -> B M H K")
         # encoder_v = rearrange(encoder_v, "B H M K -> B M H K")
 
+        # print(f"single stream attn forward before SP gather, {q.shape=}, {encoder_k.shape=} {encoder_v.shape=}")
         if enable_sp:
             # context parallel
-            sp_size = get_sequence_parallel_world_size()
-            sp_rank = get_sequence_parallel_rank()
-            visual_seqlen, _ = split_token_counts_and_frame_ids(N_t, N_h * N_w, sp_size, sp_rank)
-            assert kv_seq is not None, f"kv_seq should not be None."
+            # sp_size = get_sequence_parallel_world_size()
+            # sp_rank = get_sequence_parallel_rank()
+            # visual_seqlen, _ = split_token_counts_and_frame_ids(N_t, N_h * N_w, sp_size, sp_rank)
+            # assert kv_seq is not None, f"kv_seq should not be None."
             # attn_bias = xformers.ops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(visual_seqlen, kv_seq)
-            attn_bias = block_diagonal_additive_mask_from_seqlens(visual_seqlen, kv_seq, q.device,q.dtype)
+            # attn_bias = block_diagonal_additive_mask_from_seqlens(visual_seqlen, kv_seq, q.device,q.dtype)
             # print(f"{visual_seqlen=}, {kv_seq=}, {q.device=}, {attn_bias=}")
-            attn_bias = attn_bias.unsqueeze(0).unsqueeze(0)
+            # print(f"{visual_seqlen=}, {kv_seq=}, {q.shape=}, {encoder_k.shape=}, {q.device=}, {attn_bias=}")
+            # attn_bias = attn_bias.unsqueeze(0).unsqueeze(0)
+            # print(f"{attn_bias.shape=}")
+            # encoder_k = get_sp_group().all_gather(encoder_k, dim=1)
+            # encoder_v = get_sp_group().all_gather(encoder_v, dim=1)
+            attn_bias = None
         else:
             attn_bias = None
+        # print(f"single stream attn forward after SP gather,{q.shape=},  {encoder_k.shape=} {encoder_v.shape=}")
         # x = xformers.ops.memory_efficient_attention(q, encoder_k, encoder_v, attn_bias=attn_bias, op=None,)
         # x = rearrange(x, "B M H K -> B H M K") 
         x = FusedSDPA.apply(q, encoder_k, encoder_v, attn_bias)
@@ -353,6 +366,7 @@ class SingleStreamMutiAttention(SingleStreamAttention):
                 x_ref_attn_map=None,
                 human_num=None) -> torch.Tensor:
         
+        # print(f"single stream multi-attn forward before SP gather, {encoder_hidden_states.shape=} {x.shape=}")
         encoder_hidden_states = encoder_hidden_states.squeeze(0)
         if human_num == 1:
             return super().forward(x, encoder_hidden_states, shape)
