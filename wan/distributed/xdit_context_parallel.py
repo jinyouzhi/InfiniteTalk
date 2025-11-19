@@ -444,7 +444,7 @@ def usp_attn_forward_multitalk(self,
                      freqs,
                      dtype=torch.bfloat16,
                      ref_target_masks=None):
-    # print(f"usp attn forward begainning {x.shape=}")
+    # print(f"usp attn forward begainning {x.shape=}, {grid_sizes=}, {freqs.shape=}")
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
 
@@ -465,10 +465,9 @@ def usp_attn_forward_multitalk(self,
     k = rope_apply(k.to("cpu"), grid_sizes, freqs.to("cpu")).to(x.device)
 
     # Context Parallel
-    k = get_sp_group().all_gather(k, dim=1)
-    v = get_sp_group().all_gather(v, dim=1)
-
-    attn_bias=None
+    k_full = get_sp_group().all_gather(k, dim=1)
+    v_full = get_sp_group().all_gather(v, dim=1)
+    # print(f"usp attn before attn {q.shape=}, {k_full.shape=}, {v_full.shape=}")
 
     # xFuser 兼容 flash_attn2 格式
     # x = xFuserLongContextAttention()(
@@ -479,8 +478,8 @@ def usp_attn_forward_multitalk(self,
     #     window_size=self.window_size)
     x = attention(
         q=half(q),
-        k=half(k),
-        v=half(v),
+        k=half(k_full),
+        v=half(v_full),
         k_lens=seq_lens,
         window_size=self.window_size
     ).type_as(x)
@@ -510,13 +509,13 @@ def usp_crossattn_multi_forward_multitalk(self,
         # audio_tokens_per_frame = 32
         # visual_seqlen, frame_ids = split_token_counts_and_frame_ids(N_t, N_h * N_w, sp_size, sp_rank)
         # encoder_hidden_states = encoder_hidden_states[:, min(frame_ids):max(frame_ids)+1, ...]
-        # encoder_hidden_states = rearrange(encoder_hidden_states, "B T N C -> B (T N) C")
+        encoder_hidden_states = rearrange(encoder_hidden_states, "B T N C -> B (T N) C")
         # N_a = len(frame_ids)
         # kv_seq = [audio_tokens_per_frame * human_num] * N_a
 
         # case 走 这里
         if human_num == 1:
-            encoder_hidden_states = encoder_hidden_states.squeeze(0)
+            # encoder_hidden_states = encoder_hidden_states.squeeze(0)
             return super(SingleStreamMutiAttention, self).forward(x, encoder_hidden_states, shape, enable_sp=True, kv_seq=None) #kv_seq)
 
 

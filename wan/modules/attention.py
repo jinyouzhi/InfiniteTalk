@@ -274,9 +274,9 @@ class SingleStreamAttention(nn.Module):
             q = self.q_norm(q)
         
         # get kv from encoder_hidden_states
-        # _, N_a, _ = encoder_hidden_states.shape
+        _, N_a, _ = encoder_hidden_states.shape
         encoder_kv = self.kv_linear(encoder_hidden_states)
-        encoder_kv_shape = (B, -1, 2, self.num_heads, self.head_dim)
+        encoder_kv_shape = (B, N_a, 2, self.num_heads, self.head_dim)
         # print(f"{encoder_kv.shape=}, {encoder_kv_shape=}")
         encoder_kv = encoder_kv.view(encoder_kv_shape).permute((2, 0, 3, 1, 4)) 
         encoder_k, encoder_v = encoder_kv.unbind(0)
@@ -307,7 +307,7 @@ class SingleStreamAttention(nn.Module):
             attn_bias = None
         else:
             attn_bias = None
-        # print(f"single stream attn forward after SP gather,{q.shape=},  {encoder_k.shape=} {encoder_v.shape=}")
+        # print(f"single stream attn forward before attn,{q.shape=},  {encoder_k.shape=} {encoder_v.shape=}")
         # x = xformers.ops.memory_efficient_attention(q, encoder_k, encoder_v, attn_bias=attn_bias, op=None,)
         # x = rearrange(x, "B M H K -> B H M K") 
         x = FusedSDPA.apply(q, encoder_k, encoder_v, attn_bias)
@@ -319,6 +319,7 @@ class SingleStreamAttention(nn.Module):
         x = self.proj(x)
         x = self.proj_drop(x)
 
+        # print(f"single stream attn forward before return,{x.shape=}")
         if not enable_sp:
             # reshape x to origin shape
             x = rearrange(x, "(B N_t) S C -> B (N_t S) C", N_t=N_t)
