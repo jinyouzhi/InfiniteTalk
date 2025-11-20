@@ -236,6 +236,7 @@ class WanI2VCrossAttention(WanSelfAttention):
         self.k_img = nn.Linear(dim, dim)
         self.v_img = nn.Linear(dim, dim)
         self.norm_k_img = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+        self.fav3 = FlashAttnV3Gaudi()
 
     def forward(self, x, context, context_lens):
         context_img = context[:, :257]
@@ -253,10 +254,13 @@ class WanI2VCrossAttention(WanSelfAttention):
             x = sageattn(q, k, v, tensor_layout='NHD')
         else:   
             # img_x = attention(q, k_img, v_img, k_lens=None)
-            img_x = FlashAttnV3Gaudi().forward(q, k_img, v_img, layout_head_first=False)
+            htcore.mark_step()
+            img_x = self.fav3.forward(q, k_img, v_img, layout_head_first=False)
+            htcore.mark_step()
             # compute attention
             # x = attention(q, k, v, k_lens=context_lens)
-            x = FlashAttnV3Gaudi().forward(q, k, v, layout_head_first=False)
+            x = self.fav3.forward(q, k, v, layout_head_first=False)
+            htcore.mark_step()
 
         # output
         x = x.flatten(2)

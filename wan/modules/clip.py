@@ -12,6 +12,7 @@ from .attention import flash_attention, FlashAttnV3Gaudi
 from .tokenizers import HuggingfaceTokenizer
 from .xlm_roberta import XLMRoberta
 
+import habana_frameworks.torch.core as htcore
 __all__ = [
     'XLMRobertaCLIP',
     'clip_xlm_roberta_vit_h_14',
@@ -70,6 +71,7 @@ class SelfAttention(nn.Module):
         # layers
         self.to_qkv = nn.Linear(dim, dim * 3)
         self.proj = nn.Linear(dim, dim)
+        self.fav3 = FlashAttnV3Gaudi()
 
     def forward(self, x):
         """
@@ -95,7 +97,9 @@ class SelfAttention(nn.Module):
         #         "fast",
         #         None,)
         # x = x.transpose(1, 2).contiguous()
-        x= FlashAttnV3Gaudi().forward(q, k, v, layout_head_first=False)
+        htcore.mark_step()
+        x = self.fav3.forward(q, k, v, layout_head_first=False)
+        htcore.mark_step()
 
         x = x.reshape(b, s, c)
 
