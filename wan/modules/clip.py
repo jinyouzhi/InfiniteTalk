@@ -78,11 +78,23 @@ class SelfAttention(nn.Module):
         b, s, c, n, d = *x.size(), self.num_heads, self.head_dim
 
         # compute query, key, value
-        q, k, v = self.to_qkv(x).view(b, s, 3, n, d).unbind(2)
+        q, k, v = self.to_qkv(x).reshape(b, s, 3, n, d).unbind(2)
 
         # compute attention
         p = self.attn_dropout if self.training else 0.0
-        x = flash_attention(q, k, v, dropout_p=p, causal=self.causal, version=2)
+
+        from habana_frameworks.torch.hpex.kernels import FusedSDPA
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
+        v = v.transpose(1, 2).contiguous()
+        x = FusedSDPA.apply(q, k, v, None,
+                0.0,
+                False,
+                None,
+                "fast",
+                None,)
+        x = x.transpose(1, 2).contiguous()
+
         x = x.reshape(b, s, c)
 
         # output
@@ -190,11 +202,22 @@ class AttentionPool(nn.Module):
         b, s, c, n, d = *x.size(), self.num_heads, self.head_dim
 
         # compute query, key, value
-        q = self.to_q(self.cls_embedding).view(1, 1, n, d).expand(b, -1, -1, -1)
-        k, v = self.to_kv(x).view(b, s, 2, n, d).unbind(2)
+        q = self.to_q(self.cls_embedding).reshape(1, 1, n, d).expand(b, -1, -1, -1)
+        k, v = self.to_kv(x).reshape(b, s, 2, n, d).unbind(2)
 
         # compute attention
-        x = flash_attention(q, k, v, version=2)
+        from habana_frameworks.torch.hpex.kernels import FusedSDPA
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
+        v = v.transpose(1, 2).contiguous()
+        x = FusedSDPA.apply(q, k, v, None,
+                0.0,
+                False,
+                None,
+                "fast",
+                None,)
+        x = x.transpose(1, 2).contiguous()
+
         x = x.reshape(b, 1, c)
 
         # output
@@ -441,6 +464,7 @@ def _clip(pretrained=False,
           device='cpu',
           **kwargs):
     # init a model on device
+    device="cuda"
     with torch.device(device):
         model = model_cls(**kwargs)
 
@@ -537,6 +561,6 @@ class CLIPModel:
         videos = self.transforms.transforms[-1](videos.mul_(0.5).add_(0.5))
 
         # forward
-        with torch.cuda.amp.autocast(dtype=self.dtype):
-            out = self.model.visual(videos, use_31_block=True)
-            return out
+        # with torch.cuda.amp.autocast(dtype=self.dtype):
+        out = self.model.visual(videos.to(dtype=self.dtype), use_31_block=True)
+        return out

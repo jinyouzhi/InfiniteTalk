@@ -11,7 +11,7 @@ from einops import rearrange
 from diffusers import ModelMixin
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 
-from .attention import flash_attention, SingleStreamMutiAttention
+from .attention import flash_attention, SingleStreamMutiAttention, attention
 from ..utils.multitalk_utils import get_attn_map_with_target
 import logging
 try:
@@ -20,6 +20,9 @@ try:
     logging.info("Using sageattn")
 except:
     USE_SAGEATTN = False
+
+import habana_frameworks.torch.core as htcore
+
 
 __all__ = ['WanModel']
 
@@ -37,7 +40,6 @@ def sinusoidal_embedding_1d(dim, position):
     x = torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1)
     return x
 
-
 @amp.autocast(enabled=False)
 def rope_params(max_seq_len, dim, theta=10000):
 
@@ -51,9 +53,23 @@ def rope_params(max_seq_len, dim, theta=10000):
 
 
 @amp.autocast(enabled=False)
+def rope_params_gaudi(max_seq_len, dim, theta=10000):
+
+    assert dim % 2 == 0
+    freqs = torch.outer(
+        torch.arange(max_seq_len),
+        1.0 / torch.pow(theta,
+                        torch.arange(0, dim, 2).to(torch.float64).div(dim)))
+
+    sin = torch.sin(freqs)   # [L, D/2]
+    cos = torch.cos(freqs)
+
+    return cos, sin
+
+
+@amp.autocast(enabled=False)
 def rope_apply(x, grid_sizes, freqs):
     s, n, c = x.size(1), x.size(2), x.size(3) // 2
-
     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
 
     output = []
@@ -69,11 +85,50 @@ def rope_apply(x, grid_sizes, freqs):
         ],
                             dim=-1).reshape(seq_len, 1, -1)
         freqs_i = freqs_i.to(device=x_i.device)
+
         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
         x_i = torch.cat([x_i, x[i, seq_len:]])
 
         output.append(x_i)
     return torch.stack(output).float()
+
+@amp.autocast(enabled=False)
+def rope_apply_gaudi(x, grid_sizes, freqs):
+    s, n, c = x.size(1), x.size(2), x.size(3) // 2
+    cos, sin = freqs
+    cos = cos.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+    sin = sin.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+
+    output = []
+    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
+        seq_len = f * h * w
+
+        x_i = x.reshape(s, n, -1, 2)
+        x_real, x_imag = x_i.unbind(-1)  # [B, S, H, D//2]
+        x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(3)
+
+        cos_i = torch.cat([
+            cos[0][:f].reshape(f, 1, 1, -1).expand(f, h, w, -1),
+            cos[1][:h].reshape(1, h, 1, -1).expand(f, h, w, -1),
+            cos[2][:w].reshape(1, 1, w, -1).expand(f, h, w, -1)
+        ],dim=-1).reshape(seq_len, 1, -1)
+
+        sin_i = torch.cat([
+            sin[0][:f].reshape(f, 1, 1, -1).expand(f, h, w, -1),
+            sin[1][:h].reshape(1, h, 1, -1).expand(f, h, w, -1),
+            sin[2][:w].reshape(1, 1, w, -1).expand(f, h, w, -1)
+        ],dim=-1).reshape(seq_len, 1, -1)
+
+        cos_i = cos_i.to(device=x.device)
+        sin_i = sin_i.to(device=x.device)
+        cos_i = torch.repeat_interleave(cos_i, 2, dim=2).reshape(s, 1, -1, 2)
+        sin_i = torch.repeat_interleave(sin_i, 2, dim=2).reshape(s, 1, -1, 2)
+
+        x_i = (x_i.float() * cos_i + x_rotated.float() * sin_i).flatten(2).to(x.dtype)
+        x_i = torch.cat([x_i, x[i, seq_len:]])
+
+        output.append(x_i)
+    return torch.stack(output)
 
 
 class WanRMSNorm(nn.Module):
@@ -142,33 +197,29 @@ class WanSelfAttention(nn.Module):
 
         # query, key, value function
         def qkv_fn(x):
-            q = self.norm_q(self.q(x)).view(b, s, n, d)
-            k = self.norm_k(self.k(x)).view(b, s, n, d)
-            v = self.v(x).view(b, s, n, d)
+            q = self.norm_q(self.q(x)).reshape(b, s, n, d)
+            k = self.norm_k(self.k(x)).reshape(b, s, n, d)
+            v = self.v(x).reshape(b, s, n, d)
             return q, k, v
         q, k, v = qkv_fn(x)
 
-        q = rope_apply(q, grid_sizes, freqs)
-        k = rope_apply(k, grid_sizes, freqs)
+        # q = rope_apply(q.to("cpu"), grid_sizes, freqs.to("cpu")).to(q.device)
+        # k = rope_apply(k.to("cpu"), grid_sizes, freqs.to("cpu")).to(q.device)
+        q = rope_apply_gaudi(q, grid_sizes, freqs).to(q.device)
+        k = rope_apply_gaudi(k, grid_sizes, freqs).to(q.device)
 
         if USE_SAGEATTN:
             x = sageattn(q.to(torch.bfloat16), k.to(torch.bfloat16), v, tensor_layout='NHD')
         else:
-            x = flash_attention(
-                q=q,
-                k=k,
-                v=v,
-                k_lens=seq_lens,
-                window_size=self.window_size
-            ).type_as(x)
+            x = attention (q, k, v)
 
         # output
         x = x.flatten(2)
         x = self.o(x)
-        with torch.no_grad():
-            x_ref_attn_map = get_attn_map_with_target(q.type_as(x), k.type_as(x), grid_sizes[0], 
-                                                    ref_target_masks=ref_target_masks)
-
+        # with torch.no_grad():
+        #     x_ref_attn_map = get_attn_map_with_target(q.type_as(x), k.type_as(x), grid_sizes[0], 
+        #                                             ref_target_masks=ref_target_masks)
+        x_ref_attn_map = None
         return x, x_ref_attn_map
 
 
@@ -192,18 +243,18 @@ class WanI2VCrossAttention(WanSelfAttention):
         b, n, d = x.size(0), self.num_heads, self.head_dim
 
         # compute query, key, value
-        q = self.norm_q(self.q(x)).view(b, -1, n, d)
-        k = self.norm_k(self.k(context)).view(b, -1, n, d)
-        v = self.v(context).view(b, -1, n, d)
-        k_img = self.norm_k_img(self.k_img(context_img)).view(b, -1, n, d)
-        v_img = self.v_img(context_img).view(b, -1, n, d)
+        q = self.norm_q(self.q(x)).reshape(b, -1, n, d)
+        k = self.norm_k(self.k(context)).reshape(b, -1, n, d)
+        v = self.v(context).reshape(b, -1, n, d)
+        k_img = self.norm_k_img(self.k_img(context_img)).reshape(b, -1, n, d)
+        v_img = self.v_img(context_img).reshape(b, -1, n, d)
         if USE_SAGEATTN:
             img_x = sageattn(q, k_img, v_img, tensor_layout='NHD')
             x = sageattn(q, k, v, tensor_layout='NHD')
         else:   
-            img_x = flash_attention(q, k_img, v_img, k_lens=None)
+            img_x = attention(q, k_img, v_img, k_lens=None)
             # compute attention
-            x = flash_attention(q, k, v, k_lens=context_lens)
+            x = attention(q, k, v, k_lens=context_lens)
 
         # output
         x = x.flatten(2)
@@ -400,12 +451,12 @@ class AudioProjModel(ModelMixin, ConfigMixin):
         # process audio of first frame
         audio_embeds = rearrange(audio_embeds, "bz f w b c -> (bz f) w b c")
         batch_size, window_size, blocks, channels = audio_embeds.shape
-        audio_embeds = audio_embeds.view(batch_size, window_size * blocks * channels)
+        audio_embeds = audio_embeds.reshape(batch_size, window_size * blocks * channels)
 
         # process audio of latter frame
         audio_embeds_vf = rearrange(audio_embeds_vf, "bz f w b c -> (bz f) w b c")
         batch_size_vf, window_size_vf, blocks_vf, channels_vf = audio_embeds_vf.shape
-        audio_embeds_vf = audio_embeds_vf.view(batch_size_vf, window_size_vf * blocks_vf * channels_vf)
+        audio_embeds_vf = audio_embeds_vf.reshape(batch_size_vf, window_size_vf * blocks_vf * channels_vf)
 
         # first projection
         audio_embeds = torch.relu(self.proj1(audio_embeds)) 
@@ -414,7 +465,7 @@ class AudioProjModel(ModelMixin, ConfigMixin):
         audio_embeds_vf = rearrange(audio_embeds_vf, "(bz f) c -> bz f c", bz=B)
         audio_embeds_c = torch.concat([audio_embeds, audio_embeds_vf], dim=1) 
         batch_size_c, N_t, C_a = audio_embeds_c.shape
-        audio_embeds_c = audio_embeds_c.view(batch_size_c*N_t, C_a)
+        audio_embeds_c = audio_embeds_c.reshape(batch_size_c*N_t, C_a)
 
         # second projection
         audio_embeds_c = torch.relu(self.proj2(audio_embeds_c))
@@ -518,12 +569,23 @@ class WanModel(ModelMixin, ConfigMixin):
 
         assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
         d = dim // num_heads
-        self.freqs = torch.cat([
-            rope_params(1024, d - 4 * (d // 6)),
-            rope_params(1024, 2 * (d // 6)),
-            rope_params(1024, 2 * (d // 6))
-        ],
-                               dim=1)
+        # self.freqs = torch.cat([
+        #     rope_params(1024, d - 4 * (d // 6)),
+        #     rope_params(1024, 2 * (d // 6)),
+        #     rope_params(1024, 2 * (d // 6))
+        # ], dim=1)
+        cos = torch.cat([
+            rope_params_gaudi(1024, d - 4 * (d // 6))[0],
+            rope_params_gaudi(1024, 2 * (d // 6))[0],
+            rope_params_gaudi(1024, 2 * (d // 6))[0]
+        ],dim=1).to("hpu")
+        sin = torch.cat([
+            rope_params_gaudi(1024, d - 4 * (d // 6))[1],
+            rope_params_gaudi(1024, 2 * (d // 6))[1],
+            rope_params_gaudi(1024, 2 * (d // 6))[1]
+        ],dim=1).to("hpu")
+
+        self.freqs = (cos, sin)
 
         if model_type == 'i2v':
             self.img_emb = MLPProj(1280, dim)
@@ -630,7 +692,7 @@ class WanModel(ModelMixin, ConfigMixin):
         ])
 
         # time embeddings
-        with amp.autocast(dtype=torch.float32):
+        with torch.autocast(device_type="hpu", dtype=torch.float32):
             e = self.time_embedding(
                 sinusoidal_embedding_1d(self.freq_dim, t).float())
             e0 = self.time_projection(e).unflatten(1, (6, self.dim))
@@ -760,6 +822,8 @@ class WanModel(ModelMixin, ConfigMixin):
         else:
             for block in self.blocks:
                 x = block(x, **kwargs)
+                htcore.mark_step()
+                # torch.hpu.synchronize()
 
         # head
         x = self.head(x, e)
@@ -793,7 +857,7 @@ class WanModel(ModelMixin, ConfigMixin):
         c = self.out_dim
         out = []
         for u, v in zip(x, grid_sizes.tolist()):
-            u = u[:math.prod(v)].view(*v, *self.patch_size, c)
+            u = u[:math.prod(v)].reshape(*v, *self.patch_size, c)
             u = torch.einsum('fhwpqrc->cfphqwr', u)
             u = u.reshape(c, *[i * j for i, j in zip(v, self.patch_size)])
             out.append(u)

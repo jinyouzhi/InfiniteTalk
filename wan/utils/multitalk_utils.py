@@ -4,7 +4,7 @@ from einops import rearrange
 import torch
 import torch.nn as nn
 
-from xfuser.core.distributed import (
+from wan.distributed.parallel_state import (
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
     get_sp_group,

@@ -154,7 +154,8 @@ class InfiniteTalkPipeline:
         """
         if quant is not None and quant not in ("int8", "fp8"):
             raise ValueError("quant must be 'int8', 'fp8', or None(default fp32 model)")
-        self.device = torch.device(f"cuda:{device_id}")
+
+        self.device = torch.device("hpu")
         self.config = config
         self.rank = rank
         self.use_usp = use_usp
@@ -248,7 +249,7 @@ class InfiniteTalkPipeline:
         if t5_fsdp or dit_fsdp or use_usp:
             init_on_cpu = False
         if use_usp:
-            from xfuser.core.distributed import get_sequence_parallel_world_size
+            from .distributed.parallel_state import get_sequence_parallel_world_size
 
             from .distributed.xdit_context_parallel import (
                 usp_dit_forward_multitalk,
@@ -812,6 +813,7 @@ class InfiniteTalkPipeline:
             cond_image = cond_image.to(self.device)  # 1 C 1 H W
 
             # Repeat audio emb
+            print(f"-----------------audio_end_idx: {audio_end_idx}, max_frames_num: {max_frames_num},  len(full_audio_embs[0]): { len(full_audio_embs[0])}\n")
             if audio_end_idx >= min(max_frames_num, len(full_audio_embs[0])):
                 arrive_last_frame = True
                 miss_lengths = []

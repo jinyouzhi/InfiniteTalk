@@ -106,7 +106,7 @@ class WanI2V:
             init_on_cpu = False
 
         if use_usp:
-            from xfuser.core.distributed import get_sequence_parallel_world_size
+            from wan.distributed.parallel_state import get_sequence_parallel_world_size
 
             from .distributed.xdit_context_parallel import (
                 usp_attn_forward,

@@ -275,7 +275,7 @@ def _parse_args():
     return args
 
 def custom_init(device, wav2vec):    
-    audio_encoder = Wav2Vec2Model.from_pretrained(wav2vec, local_files_only=True).to(device)
+    audio_encoder = Wav2Vec2Model.from_pretrained(wav2vec, local_files_only=True, attn_implementation="eager").to(device)
     audio_encoder.feature_extractor._freeze_parameters()
     wav2vec_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(wav2vec, local_files_only=True)
     return wav2vec_feature_extractor, audio_encoder
@@ -478,7 +478,7 @@ def generate(args):
 
     if args.ulysses_size > 1 or args.ring_size > 1:
         assert args.ulysses_size * args.ring_size == world_size, f"The number of ulysses_size and ring_size should be equal to the world size."
-        from xfuser.core.distributed import (
+        from wan.distributed.parallel_state import (
             init_distributed_environment,
             initialize_model_parallel,
         )

@@ -3,18 +3,19 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.cuda.amp as amp
-from xfuser.core.distributed import (
+
+from wan.distributed.parallel_state import (
     get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
     get_sp_group,
 )
 from einops import rearrange
-from xfuser.core.long_ctx_attention import xFuserLongContextAttention
+# from xfuser.core.long_ctx_attention import xFuserLongContextAttention
 import xformers.ops
 
 from ..modules.model import sinusoidal_embedding_1d
 from ..utils.multitalk_utils import get_attn_map_with_target, split_token_counts_and_frame_ids, normalize_and_scale
-from ..modules.attention import SingleStreamAttention, SingleStreamMutiAttention
+from ..modules.attention import SingleStreamAttention, SingleStreamMutiAttention, attention
 
 
 def pad_freqs(original_tensor, target_len):
@@ -211,12 +212,11 @@ def usp_attn_forward(self,
     #     k = torch.cat([u[:l] for u, l in zip(k, k_lens)]).unsqueeze(0)
     #     v = torch.cat([u[:l] for u, l in zip(v, k_lens)]).unsqueeze(0)
 
-    x = xFuserLongContextAttention()(
-        None,
+    x = attention(
         query=half(q),
         key=half(k),
         value=half(v),
-        window_size=self.window_size)
+    )
 
     # TODO: padding after attention.
     # x = torch.cat([x, x.new_zeros(b, s - x.size(1), n, d)], dim=1)
