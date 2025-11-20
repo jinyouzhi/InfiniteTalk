@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
 
-from .attention import flash_attention
+from .attention import flash_attention, FlashAttnV3Gaudi
 from .tokenizers import HuggingfaceTokenizer
 from .xlm_roberta import XLMRoberta
 
@@ -84,16 +84,18 @@ class SelfAttention(nn.Module):
         p = self.attn_dropout if self.training else 0.0
 
         from habana_frameworks.torch.hpex.kernels import FusedSDPA
-        q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
-        x = FusedSDPA.apply(q, k, v, None,
-                0.0,
-                False,
-                None,
-                "fast",
-                None,)
-        x = x.transpose(1, 2).contiguous()
+
+        # q = q.transpose(1, 2).contiguous()
+        # k = k.transpose(1, 2).contiguous()
+        # v = v.transpose(1, 2).contiguous()
+        # x = FusedSDPA.apply(q, k, v, None,
+        #         0.0,
+        #         False,
+        #         None,
+        #         "fast",
+        #         None,)
+        # x = x.transpose(1, 2).contiguous()
+        x= FlashAttnV3Gaudi().forward(q, k, v, layout_head_first=False)
 
         x = x.reshape(b, s, c)
 

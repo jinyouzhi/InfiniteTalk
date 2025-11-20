@@ -11,7 +11,7 @@ from einops import rearrange
 from diffusers import ModelMixin
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 
-from .attention import flash_attention, SingleStreamMutiAttention, attention
+from .attention import flash_attention, SingleStreamMutiAttention, attention, FlashAttnV3Gaudi
 from ..utils.multitalk_utils import get_attn_map_with_target
 import logging
 try:
@@ -252,9 +252,11 @@ class WanI2VCrossAttention(WanSelfAttention):
             img_x = sageattn(q, k_img, v_img, tensor_layout='NHD')
             x = sageattn(q, k, v, tensor_layout='NHD')
         else:   
-            img_x = attention(q, k_img, v_img, k_lens=None)
+            # img_x = attention(q, k_img, v_img, k_lens=None)
+            img_x = FlashAttnV3Gaudi().forward(q, k_img, v_img, layout_head_first=False)
             # compute attention
-            x = attention(q, k, v, k_lens=context_lens)
+            # x = attention(q, k, v, k_lens=context_lens)
+            x = FlashAttnV3Gaudi().forward(q, k, v, layout_head_first=False)
 
         # output
         x = x.flatten(2)

@@ -6,6 +6,7 @@ import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from .attention import FlashAttnV3Gaudi
 
 import habana_frameworks.torch.core as htcore
 
@@ -251,11 +252,13 @@ class AttentionBlock(nn.Module):
                                                          3, dim=-1)
 
         # apply attention
-        x = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-        )
+        # x = F.scaled_dot_product_attention(
+        #     q,
+        #     k,
+        #     v,
+        # )
+        x = FlashAttnV3Gaudi().forward(q, k, v, layout_head_first=True)
+        
         x = x.squeeze(1).permute(0, 2, 1).reshape(b * t, c, h, w)
 
         # output
