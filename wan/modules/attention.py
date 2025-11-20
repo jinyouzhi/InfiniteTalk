@@ -13,6 +13,7 @@ from wan.distributed.parallel_state import (
 )
 # import xformers.ops
 from habana_frameworks.torch.hpex.kernels import FusedSDPA
+import habana_frameworks.torch.core as htcore
 
 try:
     import flash_attn_interface
@@ -68,7 +69,7 @@ class FlashAttnV3Gaudi:
                 fsdpa_mode,
                 None
             )
-            return output.permute(0, 2, 1, 3).contiguous()
+            return output.permute(0, 2, 1, 3).contiguous() if not layout_head_first else output
  
         #Flash Attention V3 for Full Attention
         linv_factor = 128.0 if fsdpa_mode == "fast" else 1.0
@@ -335,6 +336,7 @@ class SingleStreamAttention(nn.Module):
 
         self.add_q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.add_k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.fav3 = FlashAttnV3Gaudi()
 
     def forward(self, x: torch.Tensor, encoder_hidden_states: torch.Tensor, shape=None, enable_sp=False, kv_seq=None) -> torch.Tensor:
        
@@ -377,7 +379,9 @@ class SingleStreamAttention(nn.Module):
         else:
             attn_bias = None
 
-        x = FlashAttnV3Gaudi().forward(q, encoder_k, encoder_v, layout_head_first=True)
+        htcore.mark_step()
+        x = self.fav3.forward(q, encoder_k, encoder_v, layout_head_first=True)
+        htcore.mark_step()
         # x = attention(q, encoder_k, encoder_v)
         # x = rearrange(x, "B M H K -> B H M K")
 
@@ -427,6 +431,7 @@ class SingleStreamMutiAttention(SingleStreamAttention):
         self.rope_bak = int(self.class_range // 2)
 
         self.rope_1d = RotaryPositionalEmbedding1D(self.head_dim)
+        self.fav3 = FlashAttnV3Gaudi()
 
     def forward(self, 
                 x: torch.Tensor, 
@@ -488,8 +493,10 @@ class SingleStreamMutiAttention(SingleStreamAttention):
         encoder_k = self.rope_1d(encoder_k, encoder_pos)
         encoder_k = rearrange(encoder_k, "B H (N_t S) C -> (B N_t) H S C", N_t=N_t)
 
-        x = FlashAttnV3Gaudi().forward(q, encoder_k, encoder_v, layout_head_first=True)
-
+        htcore.mark_step()
+        x = self.fav3.forward(q, encoder_k, encoder_v, layout_head_first=True)
+        htcore.mark_step()
+        
         # linear transform
         x_output_shape = (B, N, C)
         x = x.transpose(1, 2) 

@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from .attention import FlashAttnV3Gaudi
+import habana_frameworks.torch.core as htcore
 
 import habana_frameworks.torch.core as htcore
 
@@ -239,6 +240,7 @@ class AttentionBlock(nn.Module):
 
         # zero out the last layer params
         nn.init.zeros_(self.proj.weight)
+        self.fav3 = FlashAttnV3Gaudi()
 
     def forward(self, x):
         identity = x
@@ -257,7 +259,9 @@ class AttentionBlock(nn.Module):
         #     k,
         #     v,
         # )
-        x = FlashAttnV3Gaudi().forward(q, k, v, layout_head_first=True)
+        htcore.mark_step()
+        x = self.fav3.forward(q, k, v, layout_head_first=True)
+        htcore.mark_step()
         
         x = x.squeeze(1).permute(0, 2, 1).reshape(b * t, c, h, w)
 
