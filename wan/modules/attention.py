@@ -380,7 +380,7 @@ class SingleStreamAttention(nn.Module):
             attn_bias = None
 
         htcore.mark_step()
-        x = self.fav3.forward(q, encoder_k, encoder_v, layout_head_first=True)
+        x = self.fav3.forward(q, encoder_k, encoder_v, cp_size=get_sequence_parallel_world_size() if enable_sp else 1, layout_head_first=True)
         htcore.mark_step()
         # x = attention(q, encoder_k, encoder_v)
         # x = rearrange(x, "B M H K -> B H M K")

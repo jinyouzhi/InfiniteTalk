@@ -191,6 +191,7 @@ class WanSelfAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+        self.fav3 = FlashAttnV3Gaudi()
 
     def forward(self, x, seq_lens, grid_sizes, freqs, ref_target_masks=None):
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
