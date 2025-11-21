@@ -7,6 +7,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+import habana_frameworks.torch.core as htcore
+
 __all__ = [
     'WanVAE',
 ]
@@ -331,6 +333,7 @@ class Encoder3d(nn.Module):
             feat_idx[0] += 1
         else:
             x = self.conv1(x)
+        htcore.mark_step()
 
         ## downsamples
         for layer in self.downsamples:
@@ -338,6 +341,7 @@ class Encoder3d(nn.Module):
                 x = layer(x, feat_cache, feat_idx)
             else:
                 x = layer(x)
+        htcore.mark_step()
 
         ## middle
         for layer in self.middle:
@@ -345,6 +349,7 @@ class Encoder3d(nn.Module):
                 x = layer(x, feat_cache, feat_idx)
             else:
                 x = layer(x)
+        htcore.mark_step()
 
         ## head
         for layer in self.head:
@@ -437,6 +442,7 @@ class Decoder3d(nn.Module):
             feat_idx[0] += 1
         else:
             x = self.conv1(x)
+        htcore.mark_step()
 
         ## middle
         for layer in self.middle:
@@ -444,6 +450,7 @@ class Decoder3d(nn.Module):
                 x = layer(x, feat_cache, feat_idx)
             else:
                 x = layer(x)
+        htcore.mark_step()
 
         ## upsamples
         for layer in self.upsamples:
@@ -451,6 +458,7 @@ class Decoder3d(nn.Module):
                 x = layer(x, feat_cache, feat_idx)
             else:
                 x = layer(x)
+        htcore.mark_step()
 
         ## head
         for layer in self.head:
@@ -469,6 +477,7 @@ class Decoder3d(nn.Module):
                 feat_idx[0] += 1
             else:
                 x = layer(x)
+        htcore.mark_step()
         return x
 
 
