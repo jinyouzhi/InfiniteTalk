@@ -385,18 +385,13 @@ class SingleStreamMutiAttention(SingleStreamAttention):
         encoder_k = self.rope_1d(encoder_k, encoder_pos)
         encoder_k = rearrange(encoder_k, "B H (N_t S) C -> (B N_t) H S C", N_t=N_t)
 
- 
-        q = rearrange(q, "B H M K -> B M H K")
-        encoder_k = rearrange(encoder_k, "B H M K -> B M H K")
-        encoder_v = rearrange(encoder_v, "B H M K -> B M H K")
-
+        # q shape: [B, H, M, K], x shape: [B, H, M, K]
         x = FusedSDPA.apply(q, encoder_k, encoder_v, None,
                 0.0,
                 False,
                 None,
                 "fast",
                 None,)
-        x = rearrange(x, "B M H K -> B H M K")
 
         # linear transform
         x_output_shape = (B, N, C)

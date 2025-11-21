@@ -569,11 +569,7 @@ class WanModel(ModelMixin, ConfigMixin):
 
         assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
         d = dim // num_heads
-        # self.freqs = torch.cat([
-        #     rope_params(1024, d - 4 * (d // 6)),
-        #     rope_params(1024, 2 * (d // 6)),
-        #     rope_params(1024, 2 * (d // 6))
-        # ], dim=1)
+
         cos = torch.cat([
             rope_params_gaudi(1024, d - 4 * (d // 6))[0],
             rope_params_gaudi(1024, 2 * (d // 6))[0],

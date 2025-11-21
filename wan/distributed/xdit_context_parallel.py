@@ -10,8 +10,6 @@ from wan.distributed.parallel_state import (
     get_sp_group,
 )
 from einops import rearrange
-# from xfuser.core.long_ctx_attention import xFuserLongContextAttention
-import xformers.ops
 
 from ..modules.model import sinusoidal_embedding_1d
 from ..utils.multitalk_utils import get_attn_map_with_target, split_token_counts_and_frame_ids, normalize_and_scale
@@ -72,6 +70,62 @@ def rope_apply(x, grid_sizes, freqs):
     return torch.stack(output).float()
 
 
+@amp.autocast(enabled=False)
+def rope_apply_gaudi(x, grid_sizes, freqs):
+    """
+    x:          [B, L, N, C].
+    grid_sizes: [B, 3].
+    freqs:      [M, C // 2].
+    """
+    s, n, c = x.size(1), x.size(2), x.size(3) // 2
+    cos, sin = freqs
+    cos = cos.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+    sin = sin.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+
+    output = []
+    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
+        seq_len = f * h * w
+
+        x_i = x.reshape(s, n, -1, 2)
+        x_real, x_imag = x_i.unbind(-1)  # [B, S, H, D//2]
+        x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(3)
+
+        cos_i = torch.cat([
+            cos[0][:f].reshape(f, 1, 1, -1).expand(f, h, w, -1),
+            cos[1][:h].reshape(1, h, 1, -1).expand(f, h, w, -1),
+            cos[2][:w].reshape(1, 1, w, -1).expand(f, h, w, -1)
+        ],dim=-1).reshape(seq_len, 1, -1)
+
+        sin_i = torch.cat([
+            sin[0][:f].reshape(f, 1, 1, -1).expand(f, h, w, -1),
+            sin[1][:h].reshape(1, h, 1, -1).expand(f, h, w, -1),
+            sin[2][:w].reshape(1, 1, w, -1).expand(f, h, w, -1)
+        ],dim=-1).reshape(seq_len, 1, -1)
+
+        cos_i = cos_i.to(device=x.device)
+        sin_i = sin_i.to(device=x.device)
+
+        sp_size = get_sequence_parallel_world_size()
+        sp_rank = get_sequence_parallel_rank()
+        cos_i = pad_freqs(cos_i, s * sp_size)
+        sin_i = pad_freqs(sin_i, s * sp_size)
+
+        s_per_rank = s
+        cos_i_rank = cos_i[(sp_rank * s_per_rank):((sp_rank + 1) *
+                                                       s_per_rank), :, :]
+        sin_i_rank = sin_i[(sp_rank * s_per_rank):((sp_rank + 1) *
+                                                       s_per_rank), :, :]
+
+        cos_i_rank = torch.repeat_interleave(cos_i_rank, 2, dim=2).reshape(s, 1, -1, 2)
+        sin_i_rank = torch.repeat_interleave(sin_i_rank, 2, dim=2).reshape(s, 1, -1, 2)
+
+        x_i = (x_i.float() * cos_i_rank + x_rotated.float() * sin_i_rank).flatten(2).to(x.dtype)
+        x_i = torch.cat([x_i, x[i, seq_len:]])
+
+        output.append(x_i)
+    return torch.stack(output)
+
+
 def usp_dit_forward_vace(self, x, vace_context, seq_len, kwargs):
     # embeddings
     c = [self.vace_patch_embedding(u.unsqueeze(0)) for u in vace_context]
@@ -117,8 +171,6 @@ def usp_dit_forward(
         assert clip_fea is not None and y is not None
     # params
     device = self.patch_embedding.weight.device
-    if self.freqs.device != device:
-        self.freqs = self.freqs.to(device)
 
     if self.model_type != 'vace' and y is not None:
         x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
@@ -249,8 +301,6 @@ def usp_dit_forward_multitalk(
     assert clip_fea is not None and y is not None
     # params
     device = self.patch_embedding.weight.device
-    if self.freqs.device != device:
-        self.freqs = self.freqs.to(device)
 
     _, T, H, W = x[0].shape
     N_t = T // self.patch_size[0]
@@ -274,7 +324,7 @@ def usp_dit_forward_multitalk(
     ])
 
     # time embeddings
-    with amp.autocast(dtype=torch.float32):
+    with torch.autocast(device_type="hpu", dtype=torch.float32):
         e = self.time_embedding(
             sinusoidal_embedding_1d(self.freq_dim, t).float())
         e0 = self.time_projection(e).unflatten(1, (6, self.dim))
@@ -446,25 +496,27 @@ def usp_attn_forward_multitalk(self,
         return q, k, v
 
     q, k, v = qkv_fn(x)
-    q = rope_apply(q, grid_sizes, freqs)
-    k = rope_apply(k, grid_sizes, freqs)
 
+    # Use Gaudi-specific rope as complex type not supported on HPU.
+    q = rope_apply_gaudi(q, grid_sizes, freqs).to(q.device)
+    k = rope_apply_gaudi(k, grid_sizes, freqs).to(q.device)
 
-    x = xFuserLongContextAttention()(
-        None,
-        query=half(q),
-        key=half(k),
-        value=half(v),
-        window_size=self.window_size)
+    # Context Parallel
+    k = get_sp_group().all_gather(k, dim=1)
+    v = get_sp_group().all_gather(v, dim=1)
 
+    x = attention(half(q),half(k),half(v),)
 
     # output
     x = x.flatten(2)
     x = self.o(x)
 
     with torch.no_grad():
-        x_ref_attn_map = get_attn_map_with_target(q.type_as(x), k.type_as(x), grid_sizes[0], 
-                                            ref_target_masks=ref_target_masks, enable_sp=True) 
+        # Note: x_ref_attn_map is not used when human_num is 1, when human_num we need to fix the
+        # issue in the call of get_attn_map_with_target.
+        # x_ref_attn_map = get_attn_map_with_target(q.type_as(x), k.type_as(x), grid_sizes[0],
+        #                                     ref_target_masks=ref_target_masks, enable_sp=True)
+        x_ref_attn_map = None
 
     return x, x_ref_attn_map
 
@@ -536,9 +588,11 @@ def usp_crossattn_multi_forward_multitalk(self,
         q = rearrange(q, "B H M K -> B M H K")
         encoder_k = rearrange(encoder_k, "B H M K -> B M H K")
         encoder_v = rearrange(encoder_v, "B H M K -> B M H K")
-        attn_bias = xformers.ops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(visual_seqlen, kv_seq)
-        x = xformers.ops.memory_efficient_attention(q, encoder_k, encoder_v, attn_bias=attn_bias, op=None,)
-        x = rearrange(x, "B M H K -> B H M K")
+
+        # attn_bias = xformers.ops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(visual_seqlen, kv_seq)
+        # x = xformers.ops.memory_efficient_attention(q, encoder_k, encoder_v, attn_bias=attn_bias, op=None,)
+        attn_bias = None
+        x = attention(q, encoder_k, encoder_v)
 
         # linear transform
         x_output_shape = (B, N, C)
