@@ -508,6 +508,7 @@ def usp_attn_forward_multitalk(self,
     # x = attention(half(q),half(k),half(v),)
     x = self.fav3.forward(half(q), half(k), half(v), cp_size=get_sequence_parallel_world_size(), layout_head_first=False)
 
+
     # output
     x = x.flatten(2)
     x = self.o(x)
@@ -536,7 +537,8 @@ def usp_crossattn_multi_forward_multitalk(self,
         sp_rank = get_sequence_parallel_rank()
         audio_tokens_per_frame = 32
         visual_seqlen, frame_ids = split_token_counts_and_frame_ids(N_t, N_h * N_w, sp_size, sp_rank)
-        encoder_hidden_states = encoder_hidden_states[:, min(frame_ids):max(frame_ids)+1, ...]
+        # Traditional SP keep full kv
+        # encoder_hidden_states = encoder_hidden_states[:, min(frame_ids):max(frame_ids)+1, ...]
         encoder_hidden_states = rearrange(encoder_hidden_states, "B T N C -> B (T N) C")
         N_a = len(frame_ids)
         kv_seq = [audio_tokens_per_frame * human_num] * N_a
