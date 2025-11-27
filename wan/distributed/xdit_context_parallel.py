@@ -421,51 +421,28 @@ def usp_dit_forward_multitalk(
                     self.accumulated_rel_l1_distance_uncond = 0
             self.previous_e0_uncond = modulated_inp.clone()
 
-    # print(f"Rank#{get_sequence_parallel_rank()}, before SP in dit {x.shape=}, {grid_sizes[0]}")
-    # Context Parallel
-    # sequence padding for uneven SP split,
-    # ensure every rank keep whole frame instead of splitting within frame.
-    # it aims to keep frame as batch dim in attention,
-    # instead of involved incompleted frame dim into seq dim with mask.
+    # Sequence Parallel
     real_seq_len = N_t * N_h * N_w
     sp_rank = get_sequence_parallel_rank()
     sp_size = get_sequence_parallel_world_size()
     sp_block_frame_num = (N_t - 1) // sp_size + 1
     sp_block_seq_len = seq_len // N_t * sp_block_frame_num
-    # x = torch.chunk(
-    #     x, get_sequence_parallel_world_size(),
-    #     dim=1)[get_sequence_parallel_rank()]
-    # x_chunk_list = torch.chunk(
-    #     x, get_sequence_parallel_world_size(),
-    #     dim=1)#[get_sequence_parallel_rank()]
-    # chunk_size = seq_len // grid_sizes[0][0] * chunk_frame_num
+    # Uneven SP split by frame-wise chunking,
+    # Ensure that every rank owns complete frames rather than slicing within a frame.
+    # Enable (frame as) batch-slice attention,
+    # instead of masked attention with involved incompleted frame into sequence dim.
+    # [1, frame * seqlen // sp_size, head_num, hidden_dim]
+    #  -> [frame // sp_size, seqlen, head_num, hidden_dim]
     x_chunk_list = torch.split(
         x, sp_block_seq_len, dim=1
     )
-    # x_chunk_list = list(x_chunk_list)
-    # while get_sequence_parallel_world_size() > len(x_chunk_list):
-    #     x_chunk_list.append(torch.zeros(x.shape[0], 0, x.shape[2], dtype=x.dtype, device=x.device))
-    # x = x_chunk_list[get_sequence_parallel_rank()]
 
-    # if get_sp_group().is_last_rank() and \
-    #     x.shape[1] * get_sequence_parallel_world_size() > N_t * N_h * N_w and \
-    #     N_t * N_h * N_w > x.shape[1] * get_sequence_parallel_rank():
-    #     x, x_pad = torch.split(x, N_t * N_h * N_w - x.shape[1] * get_sequence_parallel_rank(), dim=1)
-    # chunk_frame_num = (grid_sizes[0][0] - 1) // get_sequence_parallel_world_size() + 1
-    # chunk_size = seq_len // grid_sizes[0][0] * chunk_frame_num
-    # x = x[:, chunk_size * get_sequence_parallel_rank():chunk_size* (get_sequence_parallel_rank() + 1), :]
-    # print(f"Rank#{get_sequence_parallel_rank()}, after SP in dit {x.shape=}")
-
-    if real_seq_len <= sp_rank * sp_block_seq_len: # current sp rank full of padding
-        # skip real compututaion 
+    if real_seq_len <= sp_rank * sp_block_seq_len: # Current SP rank full of padding
+        # Skip invalid compututaion for padding part
         x = torch.empty_like(x_chunk_list[0])
     else:
+        # Extract x chunk according to sp rank
         x = x_chunk_list[sp_rank]
-
-        # if real_seq_len < (sp_rank + 1) * sp_block_seq_len: # current sp rank mix of padding and real query
-        #     x, x_pad = torch.split(x, real_seq_len - sp_block_seq_len * sp_rank, dim=1)
-        print(f"after split {x.shape=}")
-    #     x = x_chunk_list[get_sequence_parallel_rank()]
         # arguments
         kwargs = dict(
             e=e0,
@@ -508,28 +485,18 @@ def usp_dit_forward_multitalk(
             for block in self.blocks:
                 x = block(x, **kwargs)
 
-        if x.shape[1] < sp_block_seq_len: # current sp rank mix of padding and real query
-        # if real_seq_len < (sp_rank + 1) * sp_block_seq_len: # current sp rank mix of padding and real query
+        # Padding for all gather
+        if x.shape[1] < sp_block_seq_len: # Current SP rank mix of padding and real query
             x = torch.cat([
                 x,
                 torch.zeros(x.shape[0], sp_block_seq_len - x.shape[1], x.shape[2], dtype=x.dtype, device=x.device)
                 ], dim=1)
-            print(f"after cat {x.shape=}")
 
-    print(f"Rank#{get_sequence_parallel_rank()}, before head {x.shape=}")
     # head
     x = self.head(x, e)
-    print(f"Rank#{get_sequence_parallel_rank()}, after head {x.shape=}")
 
-    # Context Parallel
-    print(f"Rank#{get_sequence_parallel_rank()}, before SP all gather {x.shape=}")
+    # Sequence Parallel
     x = get_sp_group().all_gather(x, dim=1)
-    # torch.distributed.all_gather(x_chunk_list, x, get_sp_group().device_group)
-    # torch.distributed.barrier()
-    # x = torch.cat(x_chunk_list, dim=1)
-    print(f"Rank#{get_sequence_parallel_rank()}, after SP all gather {x.shape=}")
-    # print(f"{x.shape=}")
-    # print(f"{x=}")
 
     # unpatchify
     x = self.unpatchify(x, grid_sizes)
@@ -548,11 +515,6 @@ def usp_attn_forward_multitalk(self,
                      freqs,
                      dtype=torch.bfloat16,
                      ref_target_masks=None):
-    # if (get_sequence_parallel_rank() + 1) * x.shape[1] > grid_sizes[0][0] * grid_sizes[0][1] * grid_sizes[0][2]:
-    #     valid_seqlen = math.prod(grid_sizes[0])
-    #     if valid_seqlen <= get_sequence_parallel_rank() * x.shape[1]:
-    #         return x, ref_target_masks
-    #     x, x_pad = torch.split(x, valid_seqlen - get_sequence_parallel_rank() * x.shape[1], dim=1)
     b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
     half_dtypes = (torch.float16, torch.bfloat16)
 
@@ -568,18 +530,19 @@ def usp_attn_forward_multitalk(self,
 
     q, k, v = qkv_fn(x)
 
+    # Calculate the SP block sequence length for rope and all-gather padding
     N_t = grid_sizes[0][0]
     sp_size = get_sequence_parallel_world_size()
     sp_block_frame_num = (N_t - 1) // sp_size + 1
-    sp_block_seq_len = math.prod(grid_sizes[1:]) * sp_block_frame_num
+    sp_block_seq_len = math.prod(grid_sizes[0][1:]) * sp_block_frame_num
+
     # Use Gaudi-specific rope as complex type not supported on HPU.
     q = rope_apply_gaudi(q, grid_sizes, freqs, sp_block_seq_len).to(q.device)
     k = rope_apply_gaudi(k, grid_sizes, freqs, sp_block_seq_len).to(q.device)
-    # print(f"{q.shape=} {k.shape=} {v.shape=}")
 
-    # Context Parallel
+    # Traditional Sequence Parallel
     real_seq_len = math.prod(grid_sizes[0])
-    if get_sp_group().is_last_rank() and s < sp_block_seq_len: # current 
+    if s < sp_block_seq_len: # Padding to align with other ranks for all-gather
         k_pad = torch.zeros(k.shape[0], sp_block_seq_len - k.shape[1], k.shape[2], k.shape[3], dtype=k.dtype, device=k.device)
         k = torch.cat([k, k_pad], dim=1)
         v_pad = torch.zeros(v.shape[0], sp_block_seq_len - v.shape[1], k.shape[2], k.shape[3], dtype=v.dtype, device=v.device)
@@ -587,7 +550,6 @@ def usp_attn_forward_multitalk(self,
     k = get_sp_group().all_gather(k, dim=1)[:, :real_seq_len, ...]
     v = get_sp_group().all_gather(v, dim=1)[:, :real_seq_len, ...]
 
-    # x = attention(half(q),half(k),half(v),)
     x = self.fav3.forward(half(q), half(k), half(v), cp_size=get_sequence_parallel_world_size(), layout_head_first=False)
 
 
@@ -602,8 +564,6 @@ def usp_attn_forward_multitalk(self,
         #                                     ref_target_masks=ref_target_masks, enable_sp=True)
         x_ref_attn_map = None
 
-    # if (get_sequence_parallel_rank() + 1) * x.shape[1] > grid_sizes[0][0] * grid_sizes[0][1] * grid_sizes[0][2]:
-    #     x = torch.cat([x, x_pad], dim=1)
     return x, x_ref_attn_map
 
 
@@ -621,15 +581,10 @@ def usp_crossattn_multi_forward_multitalk(self,
         sp_rank = get_sequence_parallel_rank()
         audio_tokens_per_frame = 32
         visual_seqlen, frame_ids = split_token_counts_and_frame_ids(N_t, N_h * N_w, sp_size, sp_rank)
-        # Traditional SP keep full kv
-        # encoder_hidden_states = encoder_hidden_states[:, min(frame_ids):max(frame_ids)+1, ...]
-        encoder_hidden_states = torch.chunk(encoder_hidden_states, get_sequence_parallel_world_size(), dim=1)[get_sequence_parallel_rank()]
 
-        # encoder_hidden_states = torch.chunk(encoder_hidden_states, get_sequence_parallel_world_size(), dim=1)#[get_sequence_parallel_rank()]
-        # if len(encoder_hidden_states) <= get_sequence_parallel_rank():
-        #     return x
-        # else:
-        #     encoder_hidden_states = encoder_hidden_states[get_sequence_parallel_rank()]
+        # encoder_hidden_states = encoder_hidden_states[:, min(frame_ids):max(frame_ids)+1, ...]
+        # Chunk audio embedding as alongside frame-dim to match corresponding x SP shard
+        encoder_hidden_states = torch.chunk(encoder_hidden_states, sp_size, dim=1)[sp_rank]
 
         # encoder_hidden_states = rearrange(encoder_hidden_states, "B T N C -> B (T N) C")
         N_a = len(frame_ids)
@@ -637,12 +592,6 @@ def usp_crossattn_multi_forward_multitalk(self,
 
         if human_num == 1:
             encoder_hidden_states = encoder_hidden_states.squeeze(0)
-            # if (x.shape[1] // (N_h * N_w)) != encoder_hidden_states.shape[0]:
-            #     x, x_pad = torch.split(x, encoder_hidden_states.shape[0] * N_h * N_w, dim=1)
-            #     x = super(SingleStreamMutiAttention, self).forward(x, encoder_hidden_states, shape, enable_sp=True, kv_seq=kv_seq)
-            #     x = torch.cat([x, x_pad], dim=1)
-            #     return x
-
             return super(SingleStreamMutiAttention, self).forward(x, encoder_hidden_states, shape, enable_sp=True, kv_seq=kv_seq)
 
 
