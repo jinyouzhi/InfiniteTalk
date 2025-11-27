@@ -539,6 +539,14 @@ class InfiniteTalkPipeline:
             max_seq_len = ((frame_num - 1) // self.vae_stride[0] + 1) * lat_h * lat_w // (
                 self.patch_size[1] * self.patch_size[2])
             max_seq_len = int(math.ceil(max_seq_len / self.sp_size)) * self.sp_size
+            # sequence padding for uneven SP split,
+            # ensure every rank keep whole frame instead of splitting within frame.
+            # it aims to keep frame as batch dim in attention,
+            # instead of involved incompleted frame dim into seq dim with mask.
+            if self.sp_size > 1:
+                chunk_frame_num = ((frame_num - 1) // self.vae_stride[0] + 1) // self.sp_size + 1
+                max_seq_len = chunk_frame_num * self.sp_size * (lat_h * lat_w // (self.patch_size[1] * self.patch_size[2]))
+                print(f"{chunk_frame_num=}, {max_seq_len=}")
 
 
 

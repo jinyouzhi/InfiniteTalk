@@ -340,9 +340,18 @@ class SingleStreamAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, encoder_hidden_states: torch.Tensor, shape=None, enable_sp=False, kv_seq=None) -> torch.Tensor:
        
-        N_t, N_h, N_w = shape
-        if not enable_sp:
-            x = rearrange(x, "B (N_t S) C -> (B N_t) S C", N_t=N_t)
+        # N_t , N_h, N_w = shape
+        _ , N_h, N_w = shape
+        N_t = encoder_hidden_states.shape[0]
+        # if not enable_sp:
+        #     x = rearrange(x, "B (N_t S) C -> (B N_t) S C", N_t=N_t)
+        
+        # print(f"Rank#{get_sequence_parallel_rank()}, {x.shape=}, {encoder_hidden_states.shape=}")
+        # if enable_sp and get_sequence_parallel_rank() + 1 == get_sequence_parallel_world_size() and N_t < shape[0]:
+        #     if N_t == 0:
+        #         return x
+        #     x, x_pad = torch.split(x, N_t * N_h * N_w, dim=1)
+        x = rearrange(x, "B (N_t S) C -> (B N_t) S C", N_t=N_t)
 
         # get q for hidden_state
         B, N, C = x.shape
@@ -380,6 +389,7 @@ class SingleStreamAttention(nn.Module):
             attn_bias = None
 
         htcore.mark_step()
+        # print(f"Rank#{get_sequence_parallel_rank()}, {q.shape=}, {encoder_k.shape=}, {encoder_v.shape=}")
         x = self.fav3.forward(q, encoder_k, encoder_v, cp_size=get_sequence_parallel_world_size() if enable_sp else 1, layout_head_first=True)
         htcore.mark_step()
         # x = attention(q, encoder_k, encoder_v)
@@ -392,10 +402,14 @@ class SingleStreamAttention(nn.Module):
         x = self.proj(x)
         x = self.proj_drop(x)
 
-        if not enable_sp:
-            # reshape x to origin shape
-            x = rearrange(x, "(B N_t) S C -> B (N_t S) C", N_t=N_t)
+        # if not enable_sp:
+        #     # reshape x to origin shape
+        #     x = rearrange(x, "(B N_t) S C -> B (N_t S) C", N_t=N_t)
+        x = rearrange(x, "(B N_t) S C -> B (N_t S) C", N_t=N_t)
+        # if enable_sp and get_sequence_parallel_rank() + 1 == get_sequence_parallel_world_size() and N_t < shape[0]:
+        #     x = torch.cat([x, x_pad], dim=1)
 
+        # print(f"Rank#{get_sequence_parallel_rank()}, {x.shape=}")
         return x
 
 class SingleStreamMutiAttention(SingleStreamAttention):

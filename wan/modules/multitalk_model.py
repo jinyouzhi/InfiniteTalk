@@ -11,6 +11,11 @@ from einops import rearrange
 from diffusers import ModelMixin
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 
+from wan.distributed.parallel_state import (
+    get_sequence_parallel_rank,
+    get_sequence_parallel_world_size,
+    get_sp_group,
+)
 from .attention import flash_attention, SingleStreamMutiAttention, attention, FlashAttnV3Gaudi
 from ..utils.multitalk_utils import get_attn_map_with_target
 import logging
@@ -193,7 +198,7 @@ class WanSelfAttention(nn.Module):
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.fav3 = FlashAttnV3Gaudi()
 
-    def forward(self, x, seq_lens, grid_sizes, freqs, ref_target_masks=None):
+    def forward(self, x, seq_lens, max_seq_len, grid_sizes, freqs, ref_target_masks=None):
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
 
         # query, key, value function
@@ -336,6 +341,7 @@ class WanAttentionBlock(nn.Module):
         x,
         e,
         seq_lens,
+        max_seq_len,
         grid_sizes,
         freqs,
         context,
@@ -353,7 +359,7 @@ class WanAttentionBlock(nn.Module):
 
         # self-attention
         y, x_ref_attn_map = self.self_attn(
-            (self.norm1(x).float() * (1 + e[1]) + e[0]).type_as(x), seq_lens, grid_sizes,
+            (self.norm1(x).float() * (1 + e[1]) + e[0]).type_as(x), seq_lens, max_seq_len, grid_sizes,
             freqs, ref_target_masks=ref_target_masks)
         with amp.autocast(dtype=torch.float32):
             x = x + y * e[2]
@@ -364,8 +370,16 @@ class WanAttentionBlock(nn.Module):
         x = x + self.cross_attn(self.norm3(x), context, context_lens)
 
         # cross attn of audio
+        # SP conv
+        # x_full = get_sp_group().all_gather(x, dim=1)
         x_a = self.audio_cross_attn(self.norm_x(x), encoder_hidden_states=audio_embedding,
                                         shape=grid_sizes[0], x_ref_attn_map=x_ref_attn_map, human_num=human_num)
+        # x_a = self.audio_cross_attn(self.norm_x(x_full), encoder_hidden_states=audio_embedding,
+        #                                 shape=grid_sizes[0], x_ref_attn_map=None, human_num=human_num)
+        # SP resume
+        # x_a = torch.chunk(
+        #     x_a, get_sequence_parallel_world_size(),
+        #     dim=1)[get_sequence_parallel_rank()]
         x = x + x_a
 
         y = self.ffn((self.norm2(x).float() * (1 + e[4]) + e[3]).to(dtype))
@@ -791,6 +805,7 @@ class WanModel(ModelMixin, ConfigMixin):
         kwargs = dict(
             e=e0,
             seq_lens=seq_lens,
+            max_seq_len=seq_len,
             grid_sizes=grid_sizes,
             freqs=self.freqs,
             context=context,
