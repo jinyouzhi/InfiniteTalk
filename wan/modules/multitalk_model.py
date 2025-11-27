@@ -198,7 +198,7 @@ class WanSelfAttention(nn.Module):
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.fav3 = FlashAttnV3Gaudi()
 
-    def forward(self, x, seq_lens, max_seq_len, grid_sizes, freqs, ref_target_masks=None):
+    def forward(self, x, seq_lens, grid_sizes, freqs, ref_target_masks=None):
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
 
         # query, key, value function
@@ -341,7 +341,6 @@ class WanAttentionBlock(nn.Module):
         x,
         e,
         seq_lens,
-        max_seq_len,
         grid_sizes,
         freqs,
         context,
@@ -359,7 +358,7 @@ class WanAttentionBlock(nn.Module):
 
         # self-attention
         y, x_ref_attn_map = self.self_attn(
-            (self.norm1(x).float() * (1 + e[1]) + e[0]).type_as(x), seq_lens, max_seq_len, grid_sizes,
+            (self.norm1(x).float() * (1 + e[1]) + e[0]).type_as(x), seq_lens, grid_sizes,
             freqs, ref_target_masks=ref_target_masks)
         with amp.autocast(dtype=torch.float32):
             x = x + y * e[2]
@@ -805,7 +804,6 @@ class WanModel(ModelMixin, ConfigMixin):
         kwargs = dict(
             e=e0,
             seq_lens=seq_lens,
-            max_seq_len=seq_len,
             grid_sizes=grid_sizes,
             freqs=self.freqs,
             context=context,

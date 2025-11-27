@@ -72,7 +72,7 @@ def rope_apply(x, grid_sizes, freqs):
 
 
 @amp.autocast(enabled=False)
-def rope_apply_gaudi(x, grid_sizes, freqs, max_seq_len):
+def rope_apply_gaudi(x, grid_sizes, freqs, sp_block_seq_len):
     """
     x:          [B, L, N, C].
     grid_sizes: [B, 3].
@@ -117,9 +117,8 @@ def rope_apply_gaudi(x, grid_sizes, freqs, max_seq_len):
         # sin_i_rank = sin_i[(sp_rank * s_per_rank):((sp_rank + 1) *
         #                                                s_per_rank), :, :]
 
-        chunk_size = max_seq_len // sp_size
-        cos_i_rank = torch.split(cos_i, chunk_size, dim=0)[sp_rank]
-        sin_i_rank = torch.split(sin_i, chunk_size, dim=0)[sp_rank]
+        cos_i_rank = torch.split(cos_i, sp_block_seq_len, dim=0)[sp_rank]
+        sin_i_rank = torch.split(sin_i, sp_block_seq_len, dim=0)[sp_rank]
         # chunk_frame_num = (grid_sizes[0][0] - 1) // sp_size + 1
         # chunk_size = seq_len // grid_sizes[0][0] * chunk_frame_num
         # cos_i_rank = cos_i[chunk_size * sp_rank:min(cos_i.shape[0], chunk_size * (sp_rank + 1)), :, :]
@@ -424,26 +423,30 @@ def usp_dit_forward_multitalk(
 
     # print(f"Rank#{get_sequence_parallel_rank()}, before SP in dit {x.shape=}, {grid_sizes[0]}")
     # Context Parallel
-    x = torch.chunk(
-        x, get_sequence_parallel_world_size(),
-        dim=1)[get_sequence_parallel_rank()]
+    # sequence padding for uneven SP split,
+    # ensure every rank keep whole frame instead of splitting within frame.
+    # it aims to keep frame as batch dim in attention,
+    # instead of involved incompleted frame dim into seq dim with mask.
+    real_seq_len = N_t * N_h * N_w
+    sp_rank = get_sequence_parallel_rank()
+    sp_size = get_sequence_parallel_world_size()
+    sp_block_frame_num = (N_t - 1) // sp_size + 1
+    sp_block_seq_len = seq_len // N_t * sp_block_frame_num
+    # x = torch.chunk(
+    #     x, get_sequence_parallel_world_size(),
+    #     dim=1)[get_sequence_parallel_rank()]
     # x_chunk_list = torch.chunk(
     #     x, get_sequence_parallel_world_size(),
     #     dim=1)#[get_sequence_parallel_rank()]
-    # chunk_frame_num = (N_t - 1) // get_sequence_parallel_world_size() + 1
     # chunk_size = seq_len // grid_sizes[0][0] * chunk_frame_num
-    # x_chunk_list = torch.split(
-    #     x, chunk_size, dim=1
-    # )
+    x_chunk_list = torch.split(
+        x, sp_block_seq_len, dim=1
+    )
     # x_chunk_list = list(x_chunk_list)
     # while get_sequence_parallel_world_size() > len(x_chunk_list):
     #     x_chunk_list.append(torch.zeros(x.shape[0], 0, x.shape[2], dtype=x.dtype, device=x.device))
     # x = x_chunk_list[get_sequence_parallel_rank()]
 
-    real_seq_len = N_t * N_h * N_w
-    sp_block_seq_len = x.shape[1]
-    sp_rank = get_sequence_parallel_rank()
-    sp_size = get_sequence_parallel_world_size()
     # if get_sp_group().is_last_rank() and \
     #     x.shape[1] * get_sequence_parallel_world_size() > N_t * N_h * N_w and \
     #     N_t * N_h * N_w > x.shape[1] * get_sequence_parallel_rank():
@@ -455,17 +458,18 @@ def usp_dit_forward_multitalk(
 
     if real_seq_len <= sp_rank * sp_block_seq_len: # current sp rank full of padding
         # skip real compututaion 
-        pass
+        x = torch.empty_like(x_chunk_list[0])
     else:
-        if real_seq_len < (sp_rank + 1) * sp_block_seq_len: # current sp rank mix of padding and real query
-            x, x_pad = torch.split(x, real_seq_len - sp_block_seq_len * sp_rank, dim=1)
-            print(f"after split {x.shape=}")
+        x = x_chunk_list[sp_rank]
+
+        # if real_seq_len < (sp_rank + 1) * sp_block_seq_len: # current sp rank mix of padding and real query
+        #     x, x_pad = torch.split(x, real_seq_len - sp_block_seq_len * sp_rank, dim=1)
+        print(f"after split {x.shape=}")
     #     x = x_chunk_list[get_sequence_parallel_rank()]
         # arguments
         kwargs = dict(
             e=e0,
             seq_lens=seq_lens,
-            max_seq_len=seq_len,
             grid_sizes=grid_sizes,
             freqs=self.freqs,
             context=context,
@@ -504,8 +508,12 @@ def usp_dit_forward_multitalk(
             for block in self.blocks:
                 x = block(x, **kwargs)
 
-        if real_seq_len < (sp_rank + 1) * sp_block_seq_len: # current sp rank mix of padding and real query
-            x = torch.cat([x, x_pad], dim=1)
+        if x.shape[1] < sp_block_seq_len: # current sp rank mix of padding and real query
+        # if real_seq_len < (sp_rank + 1) * sp_block_seq_len: # current sp rank mix of padding and real query
+            x = torch.cat([
+                x,
+                torch.zeros(x.shape[0], sp_block_seq_len - x.shape[1], x.shape[2], dtype=x.dtype, device=x.device)
+                ], dim=1)
             print(f"after cat {x.shape=}")
 
     print(f"Rank#{get_sequence_parallel_rank()}, before head {x.shape=}")
@@ -536,7 +544,6 @@ def usp_dit_forward_multitalk(
 def usp_attn_forward_multitalk(self,
                      x,
                      seq_lens,
-                     max_seq_len,
                      grid_sizes,
                      freqs,
                      dtype=torch.bfloat16,
@@ -561,18 +568,21 @@ def usp_attn_forward_multitalk(self,
 
     q, k, v = qkv_fn(x)
 
+    N_t = grid_sizes[0][0]
+    sp_size = get_sequence_parallel_world_size()
+    sp_block_frame_num = (N_t - 1) // sp_size + 1
+    sp_block_seq_len = math.prod(grid_sizes[1:]) * sp_block_frame_num
     # Use Gaudi-specific rope as complex type not supported on HPU.
-    q = rope_apply_gaudi(q, grid_sizes, freqs, max_seq_len).to(q.device)
-    k = rope_apply_gaudi(k, grid_sizes, freqs, max_seq_len).to(q.device)
+    q = rope_apply_gaudi(q, grid_sizes, freqs, sp_block_seq_len).to(q.device)
+    k = rope_apply_gaudi(k, grid_sizes, freqs, sp_block_seq_len).to(q.device)
     # print(f"{q.shape=} {k.shape=} {v.shape=}")
 
     # Context Parallel
     real_seq_len = math.prod(grid_sizes[0])
-    if get_sequence_parallel_rank() + 1 == get_sequence_parallel_world_size() and \
-        max_seq_len > real_seq_len:
-        k_pad = torch.zeros(k.shape[0], max_seq_len // get_sequence_parallel_world_size() - k.shape[1], k.shape[2], k.shape[3], dtype=k.dtype, device=k.device)
+    if get_sp_group().is_last_rank() and s < sp_block_seq_len: # current 
+        k_pad = torch.zeros(k.shape[0], sp_block_seq_len - k.shape[1], k.shape[2], k.shape[3], dtype=k.dtype, device=k.device)
         k = torch.cat([k, k_pad], dim=1)
-        v_pad = torch.zeros(v.shape[0], max_seq_len // get_sequence_parallel_world_size() - v.shape[1], k.shape[2], k.shape[3], dtype=v.dtype, device=v.device)
+        v_pad = torch.zeros(v.shape[0], sp_block_seq_len - v.shape[1], k.shape[2], k.shape[3], dtype=v.dtype, device=v.device)
         v = torch.cat([v, v_pad], dim=1)
     k = get_sp_group().all_gather(k, dim=1)[:, :real_seq_len, ...]
     v = get_sp_group().all_gather(v, dim=1)[:, :real_seq_len, ...]
