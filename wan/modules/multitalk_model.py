@@ -365,15 +365,15 @@ class WanAttentionBlock(nn.Module):
         x = x + self.cross_attn(self.norm3(x), context, context_lens)
 
         # cross attn of audio
-        x_full = get_sp_group().all_gather(x, dim=1)
-        # x_a = self.audio_cross_attn(self.norm_x(x), encoder_hidden_states=audio_embedding,
-        #                                 shape=grid_sizes[0], x_ref_attn_map=x_ref_attn_map, human_num=human_num)
-        x_a = self.audio_cross_attn(self.norm_x(x_full), encoder_hidden_states=audio_embedding,
+        # x_full = get_sp_group().all_gather(x, dim=1)
+        x_a = self.audio_cross_attn(self.norm_x(x), encoder_hidden_states=audio_embedding,
                                         shape=grid_sizes[0], x_ref_attn_map=None, human_num=human_num)
+        # x_a = self.audio_cross_attn(self.norm_x(x_full), encoder_hidden_states=audio_embedding,
+                                        # shape=grid_sizes[0], x_ref_attn_map=None, human_num=human_num)
         # SP resume
-        x_a = torch.chunk(
-            x_a, get_sequence_parallel_world_size(),
-            dim=1)[get_sequence_parallel_rank()]
+        # x_a = torch.chunk(
+        #     x_a, get_sequence_parallel_world_size(),
+        #     dim=1)[get_sequence_parallel_rank()]
         # x_a = self.audio_cross_attn(self.norm_x(x), encoder_hidden_states=audio_embedding,
         #                                 shape=grid_sizes[0], x_ref_attn_map=x_ref_attn_map, human_num=human_num)
         x = x + x_a

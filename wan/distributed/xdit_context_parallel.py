@@ -16,6 +16,7 @@ from ..utils.multitalk_utils import get_attn_map_with_target, split_token_counts
 from ..modules.attention import SingleStreamAttention, SingleStreamMutiAttention, attention, FlashAttnV3Gaudi
 
 
+import habana_frameworks.torch.core as htcore
 def pad_freqs(original_tensor, target_len):
     seq_len, s1, s2 = original_tensor.shape
     pad_size = target_len - seq_len
@@ -505,8 +506,11 @@ def usp_attn_forward_multitalk(self,
     k = get_sp_group().all_gather(k, dim=1)
     v = get_sp_group().all_gather(v, dim=1)
 
+    htcore.mark_step()
     # x = attention(half(q),half(k),half(v),)
     x = self.fav3.forward(half(q), half(k), half(v), cp_size=get_sequence_parallel_world_size(), layout_head_first=False)
+
+    htcore.mark_step()
 
     # output
     x = x.flatten(2)
@@ -521,6 +525,92 @@ def usp_attn_forward_multitalk(self,
 
     return x, x_ref_attn_map
 
+
+
+
+def sp_crossattn_multi_forward(self, 
+                                        x: torch.Tensor, 
+                                        encoder_hidden_states: torch.Tensor,  # 1, 21, 64, C
+                                        shape=None, 
+                                        x_ref_attn_map=None,
+                                        human_num=None) -> torch.Tensor:
+        
+    sp_size = get_sequence_parallel_world_size()
+    sp_rank = get_sequence_parallel_rank()
+    encoder_hidden_states = encoder_hidden_states.squeeze(0) # [21, 64, C]
+    # encoder_hidden_states = rearrange(encoder_hidden_states, "B T N C -> B (T N) C")
+   
+    N_t, N_h, N_w = shape
+#
+    # k = get_sp_group().all_to_all(k, scatter_dim=2, gather_dim=1)
+    # v = get_sp_group().all_to_all(v, scatter_dim=2, gather_dim=1)
+    # get q for hidden_state
+
+    # q = torch.matmul(x,
+    #                             # (dim,dim//sp) -> (hn//sp * hd)
+    #                         torch.chunk(self.q_linear.weight.T, sp_size, dim=1)[sp_rank]
+    #                         ) + torch.chunk(self.q_linear.bias, sp_size)[sp_rank]
+    q = self.q_linear(x)
+    # [1, 21 * 1568 // sp, hd, hd]
+    # print(f"{sp_rank=} {x.shape=}, {q.shape=}") #[1,32928//sp, 5120]
+
+    B, N, C = x.shape
+    q_shape = (B, N, self.num_heads, self.head_dim) #[1, 32928/sp, 40,128]
+    q = q.reshape(q_shape)#.permute((0, 2, 1, 3))
+    q = get_sp_group().all_to_all(q, scatter_dim=2, gather_dim=1)#[1,32928, 40/sp, 128]
+    # print(f"{sp_rank=} {x.shape=}, {q_shape=},  {q.shape=}")
+    # print(f"{sp_rank=} {q_shape=}, {q.shape=}") #[ 1， 32928， 40/sp， 128]
+    q = rearrange(q, "B (N_t S) H D -> (B N_t) S H D", N_t=N_t) # [1, 21*1568, hd//sp, dim] -> [21, 1568,hd//sp, dim]
+
+    if self.qk_norm:
+        q = self.q_norm(q)
+    
+    # get kv from encoder_hidden_states
+    _, N_a, _ = encoder_hidden_states.shape # N_a = 32
+    # print(f"{sp_rank=} {encoder_hidden_states.shape=}") #[21, 32, 768]
+    #encoder_kv = self.kv_linear(encoder_hidden_states, )
+    encoder_k = torch.matmul(encoder_hidden_states,
+                            torch.chunk(self.kv_linear.weight.T, sp_size * 2, dim=1)[sp_rank]
+    )+ torch.chunk(self.kv_linear.bias, sp_size * 2)[sp_rank]
+    encoder_v = torch.matmul(encoder_hidden_states,
+                            torch.chunk(self.kv_linear.weight.T, sp_size * 2, dim=1)[sp_rank + sp_size]
+    )+ torch.chunk(self.kv_linear.bias, sp_size * 2)[sp_rank + sp_size]
+
+    encoder_kv_shape = (N_t, N_a, self.num_heads // sp_size, self.head_dim)
+    # print(f"{sp_rank=} before reshape{encoder_k.shape=}, {encoder_v.shape=} {encoder_kv_shape=}") # [21,32,5120/sp]
+    # encoder_kv_shape = (B, N_a, 2, self.num_heads // , self.head_dim)
+    encoder_k = encoder_k.reshape(encoder_kv_shape)#.permute((2, 0, 3, 1, 4))
+    encoder_v = encoder_v.reshape(encoder_kv_shape)#.permute((2, 0, 3, 1, 4))
+    # print(f"{sp_rank=} after reshape{encoder_k.shape=}, {encoder_v.shape=} {encoder_kv_shape=}") #[21,32,40/sp, 128]
+    # encoder_k, encoder_v = encoder_kv.unbind(0)
+
+    if self.qk_norm:
+        encoder_k = self.add_k_norm(encoder_k)
+
+
+
+    htcore.mark_step()
+    x = self.fav3.forward(q, encoder_k, encoder_v, layout_head_first=False)
+    htcore.mark_step()
+    # print(f"{sp_rank=} after attn{x.shape=}") #[21, 1568, 40/sp, 128]
+    x = x.reshape((B, -1, self.num_heads // sp_size, self.head_dim))
+    x = get_sp_group().all_to_all(x, scatter_dim=1, gather_dim=2)
+    # print(f"{sp_rank=} after all2all gather x {x.shape=}") #[1, 32928/sp, 40, 128]
+
+
+    # linear transform
+    x_output_shape = (B, N, -1)
+    # x = x.transpose(1, 2) 
+    x = x.reshape(x_output_shape) 
+    # print(f"{sp_rank=} after reshape gather x {x.shape=} {x_output_shape=}") #[1, 32928/sp, 5120]
+    x = self.proj(x)
+    # print(f"{sp_rank=} after proj gather x {x.shape=}") #[1, 32928/sp, 40, 128]
+    x = self.proj_drop(x)
+    # print(f"{sp_rank=} after proj_drop gather x {x.shape=}") #[1, 32928/sp, 40, 128]
+
+    # x = rearrange(x, "(B N_t) S C -> B (N_t S) C", N_t=N_t)
+
+    return x
 
 
 
@@ -547,7 +637,7 @@ def usp_crossattn_multi_forward_multitalk(self,
 
         # get q for hidden_state
         B, N, C = x.shape
-        q = self.q_linear(x) 
+        q = self.q_linear(x)
         q_shape = (B, N, self.num_heads, self.head_dim) 
         q = q.view(q_shape).permute((0, 2, 1, 3))
 

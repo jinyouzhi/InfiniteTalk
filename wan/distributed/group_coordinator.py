@@ -266,6 +266,19 @@ class GroupCoordinator:
             output_tensor = output_tensor.reshape(input_size)
             return output_tensor
 
+    def all_to_all(self, x, scatter_dim, gather_dim):
+        """
+        `scatter` along one dimension and `gather` along another.
+        """
+        world_size = self.world_size
+        if world_size > 1:
+            inputs = [u.contiguous() for u in x.chunk(world_size, dim=scatter_dim)]
+            outputs = [torch.empty_like(u) for u in inputs]
+            torch.distributed.all_to_all(outputs, inputs, group=self.device_group)
+            x = torch.cat(outputs, dim=gather_dim).contiguous()
+        return x
+
+
     def gather(self, input_: torch.Tensor, dst: int = 0, dim: int = -1) -> torch.Tensor:
         """
         NOTE: We assume that the input tensor is on the same device across

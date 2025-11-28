@@ -254,11 +254,14 @@ class InfiniteTalkPipeline:
             from .distributed.xdit_context_parallel import (
                 usp_dit_forward_multitalk,
                 usp_attn_forward_multitalk,
-                usp_crossattn_multi_forward_multitalk
+                usp_crossattn_multi_forward_multitalk,
+                sp_crossattn_multi_forward,
             )
             for block in self.model.blocks:
                 block.self_attn.forward = types.MethodType(
                     usp_attn_forward_multitalk, block.self_attn)
+                block.audio_cross_attn.forward = types.MethodType(
+                    sp_crossattn_multi_forward, block.audio_cross_attn)
                 # block.audio_cross_attn.forward = types.MethodType(
                 #     usp_crossattn_multi_forward_multitalk, block.audio_cross_attn)
             self.model.forward = types.MethodType(usp_dit_forward_multitalk, self.model)
