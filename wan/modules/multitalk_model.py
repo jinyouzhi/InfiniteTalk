@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from diffusers import ModelMixin
 from diffusers.configuration_utils import ConfigMixin, register_to_config
+from wan.distributed.parallel_state import get_sequence_parallel_rank, get_sequence_parallel_world_size, get_sp_group
 
 from .attention import flash_attention, SingleStreamMutiAttention, attention, FlashAttnV3Gaudi
 from ..utils.multitalk_utils import get_attn_map_with_target
@@ -364,8 +365,17 @@ class WanAttentionBlock(nn.Module):
         x = x + self.cross_attn(self.norm3(x), context, context_lens)
 
         # cross attn of audio
-        x_a = self.audio_cross_attn(self.norm_x(x), encoder_hidden_states=audio_embedding,
-                                        shape=grid_sizes[0], x_ref_attn_map=x_ref_attn_map, human_num=human_num)
+        x_full = get_sp_group().all_gather(x, dim=1)
+        # x_a = self.audio_cross_attn(self.norm_x(x), encoder_hidden_states=audio_embedding,
+        #                                 shape=grid_sizes[0], x_ref_attn_map=x_ref_attn_map, human_num=human_num)
+        x_a = self.audio_cross_attn(self.norm_x(x_full), encoder_hidden_states=audio_embedding,
+                                        shape=grid_sizes[0], x_ref_attn_map=None, human_num=human_num)
+        # SP resume
+        x_a = torch.chunk(
+            x_a, get_sequence_parallel_world_size(),
+            dim=1)[get_sequence_parallel_rank()]
+        # x_a = self.audio_cross_attn(self.norm_x(x), encoder_hidden_states=audio_embedding,
+        #                                 shape=grid_sizes[0], x_ref_attn_map=x_ref_attn_map, human_num=human_num)
         x = x + x_a
 
         y = self.ffn((self.norm2(x).float() * (1 + e[4]) + e[3]).to(dtype))
