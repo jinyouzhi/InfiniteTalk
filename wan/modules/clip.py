@@ -85,19 +85,7 @@ class SelfAttention(nn.Module):
         # compute attention
         p = self.attn_dropout if self.training else 0.0
 
-        from habana_frameworks.torch.hpex.kernels import FusedSDPA
-
-        # q = q.transpose(1, 2).contiguous()
-        # k = k.transpose(1, 2).contiguous()
-        # v = v.transpose(1, 2).contiguous()
-        # x = FusedSDPA.apply(q, k, v, None,
-        #         0.0,
-        #         False,
-        #         None,
-        #         "fast",
-        #         None,)
-        # x = x.transpose(1, 2).contiguous()
-        htcore.mark_step()
+        # compute attention
         x = self.fav3.forward(q, k, v, layout_head_first=False)
         htcore.mark_step()
 
@@ -200,6 +188,7 @@ class AttentionPool(nn.Module):
             nn.Linear(dim, int(dim * mlp_ratio)),
             QuickGELU() if activation == 'quick_gelu' else nn.GELU(),
             nn.Linear(int(dim * mlp_ratio), dim), nn.Dropout(proj_dropout))
+        self.fav3 = FlashAttnV3Gaudi()
 
     def forward(self, x):
         """
@@ -212,17 +201,8 @@ class AttentionPool(nn.Module):
         k, v = self.to_kv(x).reshape(b, s, 2, n, d).unbind(2)
 
         # compute attention
-        from habana_frameworks.torch.hpex.kernels import FusedSDPA
-        q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
-        x = FusedSDPA.apply(q, k, v, None,
-                0.0,
-                False,
-                None,
-                "fast",
-                None,)
-        x = x.transpose(1, 2).contiguous()
+        x = self.fav3.forward(q, k, v, layout_head_first=False)
+        htcore.mark_step()
 
         x = x.reshape(b, 1, c)
 

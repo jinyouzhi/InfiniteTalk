@@ -1,18 +1,17 @@
+# Adapted from https://github.com/xdit-project/xDiT/blob/main/xfuser/envs.py
 import os
 import torch
 import diffusers
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 from packaging import version
 
+import logging
+
 try:
     import torch_musa
 except ModuleNotFoundError:
     pass
 
-# from xfuser.logger import init_logger
-
-# logger = init_logger(__name__)
-import logging
 
 if TYPE_CHECKING:
     MASTER_ADDR: str = ""

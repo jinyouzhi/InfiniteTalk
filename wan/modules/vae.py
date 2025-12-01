@@ -9,7 +9,6 @@ from einops import rearrange
 from .attention import FlashAttnV3Gaudi
 import habana_frameworks.torch.core as htcore
 
-import habana_frameworks.torch.core as htcore
 
 __all__ = [
     'WanVAE',
@@ -259,7 +258,6 @@ class AttentionBlock(nn.Module):
         #     k,
         #     v,
         # )
-        htcore.mark_step()
         x = self.fav3.forward(q, k, v, layout_head_first=True)
         htcore.mark_step()
         

@@ -35,7 +35,7 @@ __all__ = [
 ]
 
 class FlashAttnV3Gaudi:
-    def __init__ (self):
+    def __init__(self):
         self.q_chunk = int(os.environ.get("FA3_Q_CHUNK", 8192))
         self.kv_chunk = int(os.environ.get("FA3_KV_CHUNK", 8192))
 
@@ -370,17 +370,16 @@ class SingleStreamAttention(nn.Module):
 
         # if enable_sp:
         #     # context parallel
-        #     # sp_size = get_sequence_parallel_world_size()
-        #     # sp_rank = get_sequence_parallel_rank()
-        #     # visual_seqlen, _ = split_token_counts_and_frame_ids(N_t, N_h * N_w, sp_size, sp_rank)
-        #     # assert kv_seq is not None, f"kv_seq should not be None."
-        #     # attn_bias = xformers.ops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(visual_seqlen, kv_seq)
+        #     sp_size = get_sequence_parallel_world_size()
+        #     sp_rank = get_sequence_parallel_rank()
+        #     visual_seqlen, _ = split_token_counts_and_frame_ids(N_t, N_h * N_w, sp_size, sp_rank)
+        #     assert kv_seq is not None, f"kv_seq should not be None."
+        #     attn_bias = xformers.ops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(visual_seqlen, kv_seq)
         #     attn_bias = None
         # else:
         #     attn_bias = None
         # gather q/k/v sequence
 
-        htcore.mark_step()
         x = self.fav3.forward(q, encoder_k, encoder_v, layout_head_first=True)
         htcore.mark_step()
 
@@ -495,7 +494,6 @@ class SingleStreamMutiAttention(SingleStreamAttention):
         encoder_k = self.rope_1d(encoder_k, encoder_pos)
         encoder_k = rearrange(encoder_k, "B H (N_t S) C -> (B N_t) H S C", N_t=N_t)
 
-        htcore.mark_step()
         x = self.fav3.forward(q, encoder_k, encoder_v, layout_head_first=True)
         htcore.mark_step()
         

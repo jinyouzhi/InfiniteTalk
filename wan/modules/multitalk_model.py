@@ -205,15 +205,12 @@ class WanSelfAttention(nn.Module):
             return q, k, v
         q, k, v = qkv_fn(x)
 
-        # q = rope_apply(q.to("cpu"), grid_sizes, freqs.to("cpu")).to(q.device)
-        # k = rope_apply(k.to("cpu"), grid_sizes, freqs.to("cpu")).to(q.device)
         q = rope_apply_gaudi(q, grid_sizes, freqs).to(q.device)
         k = rope_apply_gaudi(k, grid_sizes, freqs).to(q.device)
 
         if USE_SAGEATTN:
             x = sageattn(q.to(torch.bfloat16), k.to(torch.bfloat16), v, tensor_layout='NHD')
         else:
-            htcore.mark_step()
             x = self.fav3.forward(q, k, v, layout_head_first=False)
             htcore.mark_step()
 
@@ -258,7 +255,6 @@ class WanI2VCrossAttention(WanSelfAttention):
             x = sageattn(q, k, v, tensor_layout='NHD')
         else:   
             # img_x = attention(q, k_img, v_img, k_lens=None)
-            htcore.mark_step()
             img_x = self.fav3.forward(q, k_img, v_img, layout_head_first=False)
             htcore.mark_step()
             # compute attention
@@ -365,17 +361,8 @@ class WanAttentionBlock(nn.Module):
         x = x + self.cross_attn(self.norm3(x), context, context_lens)
 
         # cross attn of audio
-        # x_full = get_sp_group().all_gather(x, dim=1)
         x_a = self.audio_cross_attn(self.norm_x(x), encoder_hidden_states=audio_embedding,
                                         shape=grid_sizes[0], x_ref_attn_map=None, human_num=human_num)
-        # x_a = self.audio_cross_attn(self.norm_x(x_full), encoder_hidden_states=audio_embedding,
-                                        # shape=grid_sizes[0], x_ref_attn_map=None, human_num=human_num)
-        # SP resume
-        # x_a = torch.chunk(
-        #     x_a, get_sequence_parallel_world_size(),
-        #     dim=1)[get_sequence_parallel_rank()]
-        # x_a = self.audio_cross_attn(self.norm_x(x), encoder_hidden_states=audio_embedding,
-        #                                 shape=grid_sizes[0], x_ref_attn_map=x_ref_attn_map, human_num=human_num)
         x = x + x_a
 
         y = self.ffn((self.norm2(x).float() * (1 + e[4]) + e[3]).to(dtype))

@@ -29,9 +29,7 @@ if envs._is_hpu():
     from torch.hpu import synchronize
 
 import logging as logger
-# from xfuser.logger import init_logger
 
-# logger = init_logger(__name__)
 
 TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
